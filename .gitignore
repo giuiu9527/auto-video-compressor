@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+dist/
+.eggs/
+*.egg-info/
+.venv
+
+# Binaries
+bin/*.exe
+
+# App Local State
+watch_compress_settings.json
+crash_log.txt
+
+# IDE
+.idea/
+.vscode/
