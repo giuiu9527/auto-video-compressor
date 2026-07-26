@@ -9,9 +9,10 @@ build/
 dist/
 .eggs/
 *.egg-info/
-.venv
+.venv/
+venv/
 
-# Binaries
+# Binaries (ffmpeg/ffprobe are large, don't track in git)
 bin/*.exe
 
 # App Local State
@@ -21,3 +22,19 @@ crash_log.txt
 # IDE
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
+
+# Temporary / Debug scripts
+verify_*.py
+test_*.py
+
+# PyInstaller intermediate
+*.manifest
+*.spec.bak
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store

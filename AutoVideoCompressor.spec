@@ -1,12 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas_p, binaries_p, hiddenimports_p = collect_all('PySide6')
 datas_s, binaries_s, hiddenimports_s = collect_all('shiboken6')
 
-datas = datas_p + datas_s + [('bin', 'bin')]
-binaries = binaries_p + binaries_s
-hiddenimports = hiddenimports_p + hiddenimports_s
+datas = datas_s + [('bin', 'bin')]
+binaries = binaries_s
+hiddenimports = hiddenimports_s + [
+    'PySide6.QtCore',
+    'PySide6.QtGui',
+    'PySide6.QtWidgets',
+    'PySide6.QtNetwork',
+]
 
 block_cipher = None
 
@@ -19,7 +23,16 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        'PySide6.QtWebEngineCore',
+        'PySide6.QtWebEngineWidgets',
+        'PySide6.Qt3DCore',
+        'PySide6.Qt3DRender',
+        'PySide6.Qt3DAnimation',
+        'PySide6.QtDesigner',
+        'PySide6.QtQml',
+        'PySide6.QtQuick',
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
