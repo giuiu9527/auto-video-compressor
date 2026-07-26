@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QThread, Qt, QTimer, Signal
+from updater import UpdateCheckWorker, apply_zip_update_and_restart
 from PySide6.QtGui import QColor, QFont, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
@@ -100,7 +101,10 @@ class MainWindow(QMainWindow):
         title_box.addWidget(title); title_box.addWidget(subtitle)
         badge = QLabel(f"v{APP_VERSION}"); badge.setObjectName("HeaderBadge")
         badge.setAlignment(Qt.AlignCenter)
+        self.btn_check_update = QPushButton("🚀 检查更新")
+        self.btn_check_update.clicked.connect(lambda: self.check_updates(manual=True))
         lay.addLayout(title_box, 1)
+        lay.addWidget(self.btn_check_update, 0, Qt.AlignRight | Qt.AlignVCenter)
         lay.addWidget(badge, 0, Qt.AlignRight | Qt.AlignVCenter)
         return frame
 
@@ -435,8 +439,29 @@ class MainWindow(QMainWindow):
             self.log(f"已自动加载配置文件: {SETTINGS_FILE}")
             if self.edit_watch_dir.text().strip() and Path(self.edit_watch_dir.text().strip()).exists():
                 self._on_scan_now_clicked()
+            # 自动后台检查更新
+            self.check_updates(manual=False)
         except Exception as exc:
             self.log(f"配置文件加载异常: {exc}")
+
+    def check_updates(self, manual: bool = False) -> None:
+        self.manual_check = manual
+        self.update_worker = UpdateCheckWorker(APP_VERSION)
+        self.update_worker.check_finished_signal.connect(self._on_update_check_finished)
+        self.update_worker.start()
+
+    def _on_update_check_finished(self, has_update: bool, new_ver: str, notes: str, url: str) -> None:
+        if has_update:
+            msg = f"发现新版本 [{new_ver}]！\n\n当前版本: v{APP_VERSION}\n最新版本: {new_ver}\n\n更新日志:\n{notes}\n\n是否立即下载升级？"
+            res = QMessageBox.question(self, "版本更新提示", msg, QMessageBox.Yes | QMessageBox.No)
+            if res == QMessageBox.Yes and url:
+                try:
+                    self.log(f"正在准备在线升级: {url}")
+                    apply_zip_update_and_restart(url, self.log)
+                except Exception as exc:
+                    QMessageBox.critical(self, "更新失败", f"在线升级失败: {exc}")
+        elif getattr(self, "manual_check", False):
+            QMessageBox.information(self, "更新检查", f"当前已是最新版本 (v{APP_VERSION})！")
 
     # ── 扫描与表格渲染 ────────────────────────────────────
     def _on_scan_completed(self, items: list[ScannedFile]) -> None:
