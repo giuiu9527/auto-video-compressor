@@ -133,16 +133,13 @@ def probe_duration(video: Path) -> float:
         return 0.0
 
 
-def is_file_writing_or_locked(video_path: Path, min_stable_sec: int = 30) -> bool:
+def check_file_writing_status(video_path: Path, min_stable_sec: int = 30) -> tuple[bool, int, str]:
     """
     4重防御机制检测 Syncthing 实时同步及边录边传未完成的视频：
-    1. 临时文件模式过滤 (.syncthing. / .tmp / .part)
-    2. 文件句柄独占锁定尝试 (open r+b)
-    3. 修改时间 (st_mtime) 冷却判定（若 min_stable_sec 秒内被修改过，认定为未录制完）
-    4. MKV/MP4 视频容器完整性校验 (ffprobe 容器尾部/Header校验)
+    返回 (is_locked: bool, remaining_sec: int, reason_desc: str)
     """
     if not video_path.exists():
-        return True
+        return True, 0, "文件不存在"
 
     name_lower = video_path.name.lower()
     # 1. 临时/同步中间文件模式判断
@@ -154,24 +151,33 @@ def is_file_writing_or_locked(video_path: Path, min_stable_sec: int = 30) -> boo
         or name_lower.endswith(".crdownload")
         or "!syncthing" in name_lower
     ):
-        return True
+        return True, 0, "Syncthing/临时文件写入中"
 
-    # 2. 独占句柄检测
+    # 2. 独占句柄检测（兼容只读文件）
     try:
         with open(video_path, "r+b"):
             pass
-    except (PermissionError, OSError):
-        return True
+    except PermissionError:
+        # 若被录制软件独占写入或无法写访问，尝试只读读入
+        try:
+            with open(video_path, "rb"):
+                pass
+        except Exception:
+            return True, 0, "文件被录制/同步软件独占锁定"
+    except OSError:
+        return True, 0, "文件系统锁定"
 
-    # 3. 文件修改时间冷却检测（核心：Syncthing 或 录屏软件 30秒内动过该文件，判定为尚未录完/同步完）
+    # 3. 文件修改时间 (st_mtime) 冷却判定
     try:
         mtime = video_path.stat().st_mtime
-        if (time.time() - mtime) < min_stable_sec:
-            return True
+        elapsed = time.time() - mtime
+        if elapsed < min_stable_sec:
+            remaining = int(min_stable_sec - elapsed) + 1
+            return True, remaining, f"静止冷却中 (还需 {remaining}s)"
     except Exception:
-        return True
+        return True, 0, "获取文件属性失败"
 
-    # 4. 容器完整性探测校验（MKV/MP4 尚未写完时，尾部索引/Cluster 不完整，ffprobe 会报 error）
+    # 4. 容器完整性探测校验 (MKV/MP4 尚未写完时，尾部索引/Cluster 不完整，ffprobe 会报 error)
     cmd = [
         "ffprobe", "-v", "error", "-select_streams", "v:0",
         "-show_entries", "stream=codec_name",
@@ -179,6 +185,11 @@ def is_file_writing_or_locked(video_path: Path, min_stable_sec: int = 30) -> boo
     ]
     p = run_cmd(cmd, timeout=8)
     if p.returncode != 0 or not (p.stdout or "").strip():
-        return True
+        return True, 0, "视频结构未录制完整"
 
-    return False
+    return False, 0, ""
+
+
+def is_file_writing_or_locked(video_path: Path, min_stable_sec: int = 30) -> bool:
+    is_locked, _, _ = check_file_writing_status(video_path, min_stable_sec)
+    return is_locked

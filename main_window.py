@@ -17,7 +17,7 @@ from PySide6.QtGui import QColor, QFont, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
     QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
+    QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar,
     QPushButton, QSpinBox, QSplitter, QStatusBar, QTableWidget, QTableWidgetItem,
     QTabWidget, QVBoxLayout, QWidget,
 )
@@ -174,6 +174,8 @@ class MainWindow(QMainWindow):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_table_context_menu)
         v.addWidget(self.table)
         return wrap
 
@@ -527,6 +529,57 @@ class MainWindow(QMainWindow):
             for item in items:
                 if item.status == FileStatus.WAITING:
                     self.compressor_worker.enqueue(item.file_path)
+
+    def _show_table_context_menu(self, pos) -> None:
+        selected_rows = set(item.row() for item in self.table.selectedItems())
+        if not selected_rows:
+            return
+
+        menu = QMenu(self)
+        act_force = menu.addAction("⚡ 强制立即提交压缩 (跳过冷却等待)")
+        act_open_dir = menu.addAction("📂 打开所在文件夹")
+
+        action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if action == act_force:
+            self._force_compress_selected_rows(selected_rows)
+        elif action == act_open_dir:
+            self._open_selected_rows_folder(selected_rows)
+
+    def _force_compress_selected_rows(self, selected_rows: set[int]) -> None:
+        watch_dir = Path(self.edit_watch_dir.text().strip())
+        if not watch_dir.exists():
+            return
+
+        for r in selected_rows:
+            rel_item = self.table.item(r, 1)
+            if not rel_item:
+                continue
+            file_path = watch_dir / rel_item.text()
+            if not file_path.exists():
+                name_item = self.table.item(r, 0)
+                if name_item:
+                    file_path = watch_dir / name_item.text()
+
+            if file_path.exists():
+                self.log(f"⚡ 手动强制解除冷却等待，提交压缩: {file_path.name}")
+                if self.watcher_worker:
+                    self.watcher_worker.force_process(file_path)
+                if self.compressor_worker:
+                    self.compressor_worker.enqueue(file_path)
+
+        if self.watcher_worker:
+            scanned = self.watcher_worker.scan_once()
+            self._on_scan_completed(scanned)
+
+    def _open_selected_rows_folder(self, selected_rows: set[int]) -> None:
+        watch_dir = Path(self.edit_watch_dir.text().strip())
+        for r in selected_rows:
+            rel_item = self.table.item(r, 1)
+            if rel_item:
+                p = watch_dir / rel_item.text()
+                if p.exists():
+                    open_dir_folder(p.parent)
+                    break
 
     # ── 启动 / 停止 监控 ──────────────────────────────────
     def start_watching(self) -> None:

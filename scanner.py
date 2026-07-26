@@ -11,7 +11,7 @@ from typing import Optional
 from PySide6.QtCore import QThread, Signal
 
 from config import VIDEO_EXTS, WatchConfig
-from utils import is_file_writing_or_locked, probe_duration
+from utils import check_file_writing_status, probe_duration
 
 
 class FileStatus:
@@ -44,6 +44,7 @@ class FolderWatcherWorker(QThread):
         self._stop_requested = False
         self._stop_lock = Lock()
         self.known_status_map: dict[str, tuple[str, int]] = {}  # filepath_str -> (status, progress)
+        self.forced_paths: set[str] = set()
 
     def stop(self) -> None:
         with self._stop_lock:
@@ -55,6 +56,11 @@ class FolderWatcherWorker(QThread):
 
     def update_file_status(self, file_path: Path, status: str, progress: int = 0) -> None:
         self.known_status_map[str(file_path)] = (status, progress)
+
+    def force_process(self, file_path: Path) -> None:
+        path_str = str(file_path)
+        self.forced_paths.add(path_str)
+        self.known_status_map.pop(path_str, None)
 
     def scan_once(self) -> list[ScannedFile]:
         cfg = self.watch_cfg
@@ -86,8 +92,9 @@ class FolderWatcherWorker(QThread):
             except ValueError:
                 rel_str = p.name
 
-            # 已经有记忆的状态（如正在压缩/已完成/失败）
             path_str = str(p)
+
+            # 已经有记忆的状态（如正在压缩/已完成/失败）
             if path_str in self.known_status_map:
                 st, pct = self.known_status_map[path_str]
                 size_mb = p.stat().st_size / (1024 * 1024) if p.exists() else 0
@@ -124,11 +131,16 @@ class FolderWatcherWorker(QThread):
                     results.append(ScannedFile(p, rel_str, p.stat().st_size / (1024 * 1024), 0.0, st, pct))
                     continue
 
-            # 3. 检查文件是否正在被录制/写入独占中（多重防护）
-            if is_file_writing_or_locked(p, cfg.min_stable_sec):
-                st, pct = FileStatus.SKIPPED_WRITING, 0
-                results.append(ScannedFile(p, rel_str, p.stat().st_size / (1024 * 1024), 0.0, st, pct))
-                continue
+            # 3. 检查文件是否正在被录制/写入独占中（多重防护），支持用户手动强制跳过检测
+            if path_str not in self.forced_paths:
+                is_locked, remaining_sec, reason = check_file_writing_status(p, cfg.min_stable_sec)
+                if is_locked:
+                    if remaining_sec > 0:
+                        st_desc = f"⏳ 暂跳过 (还需 {remaining_sec}s 冷却)"
+                    else:
+                        st_desc = f"⏳ 暂跳过 ({reason})"
+                    results.append(ScannedFile(p, rel_str, p.stat().st_size / (1024 * 1024), 0.0, st_desc, 0))
+                    continue
 
             # 4. 正常可压缩文件
             dur = probe_duration(p)
