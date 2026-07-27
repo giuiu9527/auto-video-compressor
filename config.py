@@ -8,7 +8,7 @@ from pathlib import Path
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".flv", ".ts", ".m4v", ".webm"}
 
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 
 
 def app_root_dir() -> Path:
@@ -17,7 +17,22 @@ def app_root_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-APP_DIR = app_root_dir()
+def get_app_icon_path() -> Path:
+    candidates = [
+        APP_DIR / "icon.ico",
+        APP_DIR / "_internal" / "icon.ico",
+        Path(__file__).resolve().parent / "icon.ico",
+    ]
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.insert(0, Path(meipass) / "icon.ico")
+    for p in candidates:
+        if p.exists():
+            return p
+    return APP_DIR / "icon.ico"
+
+
+APP_ICON_PATH = get_app_icon_path()
 SETTINGS_FILE = APP_DIR / "watch_compress_settings.json"
 
 

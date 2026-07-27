@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas_s, binaries_s, hiddenimports_s = collect_all('shiboken6')
 
-datas = datas_s + [('bin', 'bin')]
+datas = datas_s + [('bin', 'bin'), ('icon.ico', '.')]
 binaries = binaries_s
 hiddenimports = hiddenimports_s + [
     'PySide6.QtCore',

@@ -27,7 +27,7 @@ from compressor import (
     RATE_MODE_OPTIONS, VIDEO_CODEC_OPTIONS, VideoCompressor,
 )
 from config import (
-    APP_DIR, APP_VERSION, SETTINGS_FILE, CompressionConfig, WatchConfig,
+    APP_DIR, APP_ICON_PATH, APP_VERSION, SETTINGS_FILE, CompressionConfig, WatchConfig,
 )
 from scanner import FileStatus, FolderWatcherWorker, ScannedFile
 from utils import format_time, now_str
@@ -49,7 +49,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"视频自动循环监控压缩工具 v{APP_VERSION}")
         self.resize(1080, 620)
-        self.setWindowIcon(QIcon(str(APP_DIR / "icon.ico")))
+        if APP_ICON_PATH.exists():
+            self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
 
         self.watch_cfg = WatchConfig()
         self.comp_cfg = CompressionConfig()

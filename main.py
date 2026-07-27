@@ -45,11 +45,10 @@ def main() -> None:
     app.setFont(QFont("Microsoft YaHei UI", 9))
     app.setStyleSheet(LIGHT_QSS)
 
-    from config import APP_DIR
+    from config import APP_ICON_PATH
     from PySide6.QtGui import QIcon
-    icon_path = APP_DIR / "icon.ico"
-    if icon_path.exists():
-        app.setWindowIcon(QIcon(str(icon_path)))
+    if APP_ICON_PATH.exists():
+        app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
 
     win = MainWindow()
     win.show()
