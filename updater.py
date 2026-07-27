@@ -233,7 +233,7 @@ def apply_zip_update_and_restart(zip_path: str, log_cb=None) -> None:
 chcp 65001 > nul
 timeout /t 2 /nobreak > nul
 powershell -Command "Expand-Archive -Path '{zip_path}' -DestinationPath '{app_dir}' -Force"
-start "" "{app_dir}\\AutoVideoCompressor.exe"
+start "" "{app_dir}\\IMM-Compressor.exe"
 del "%~f0"
 """
     bat_script.write_text(bat_content, encoding="utf-8")
