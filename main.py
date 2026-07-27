@@ -29,6 +29,14 @@ sys.excepthook = log_uncaught_exceptions
 
 
 def main() -> None:
+    # 在 Windows 上显式注册 AppUserModelID，确保任务栏正确呈现自定义图标而非 Python/Qt 默认窗口图标
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("giuiu9527.immcompressor.video.1.0")
+        except Exception:
+            pass
+
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
@@ -36,6 +44,12 @@ def main() -> None:
     app.setStyle("Fusion")
     app.setFont(QFont("Microsoft YaHei UI", 9))
     app.setStyleSheet(LIGHT_QSS)
+
+    from config import APP_DIR
+    from PySide6.QtGui import QIcon
+    icon_path = APP_DIR / "icon.ico"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
 
     win = MainWindow()
     win.show()
