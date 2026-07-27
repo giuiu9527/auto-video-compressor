@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QThread, Qt, QTimer, Signal
-from updater import UpdateCheckWorker, apply_zip_update_and_restart
+from updater import UpdateCheckWorker, UpdateProgressDialog, apply_zip_update_and_restart
 from PySide6.QtGui import QColor, QFont, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
@@ -458,11 +458,15 @@ class MainWindow(QMainWindow):
             msg = f"发现新版本 [{new_ver}]！\n\n当前版本: v{APP_VERSION}\n最新版本: {new_ver}\n\n更新日志:\n{notes}\n\n是否立即下载升级？"
             res = QMessageBox.question(self, "版本更新提示", msg, QMessageBox.Yes | QMessageBox.No)
             if res == QMessageBox.Yes and url:
-                try:
-                    self.log(f"正在准备在线升级: {url}")
-                    apply_zip_update_and_restart(url, self.log)
-                except Exception as exc:
-                    QMessageBox.critical(self, "更新失败", f"在线升级失败: {exc}")
+                self.log(f"正在准备在线升级: {url}")
+                dlg = UpdateProgressDialog(url, new_ver, parent=self)
+                if dlg.exec() and dlg.success:
+                    try:
+                        apply_zip_update_and_restart(dlg.downloaded_zip_path, self.log)
+                    except Exception as exc:
+                        QMessageBox.critical(self, "更新失败", f"应用更新失败: {exc}")
+                elif not dlg.success:
+                    self.log("更新已取消或下载失败。")
         elif getattr(self, "manual_check", False):
             QMessageBox.information(self, "更新检查", f"当前已是最新版本 (v{APP_VERSION})！")
 
