@@ -359,6 +359,7 @@ class MainWindow(QMainWindow):
             interval_sec=self.spin_interval.value(),
             skip_prefix=self.edit_prefix.text().strip() or "(ys)",
             auto_start_compress=self.chk_auto_start.isChecked(),
+            min_stable_sec=self.spin_min_stable.value(),
         )
 
     def collect_compression_config(self) -> CompressionConfig:
@@ -565,7 +566,7 @@ class MainWindow(QMainWindow):
                 if self.watcher_worker:
                     self.watcher_worker.force_process(file_path)
                 if self.compressor_worker:
-                    self.compressor_worker.enqueue(file_path)
+                    self.compressor_worker.force_enqueue(file_path)
 
         if self.watcher_worker:
             scanned = self.watcher_worker.scan_once()
@@ -642,11 +643,21 @@ class VideoCompressorWorker(QThread):
         self.c_cfg = c_cfg
         self.queue: list[Path] = []
         self.active_set: set[str] = set()
+        self.ever_enqueued: set[str] = set()  # 记录所有曾入队的文件，防止重复压缩
         self._stop_requested = False
 
     def enqueue(self, video_path: Path) -> None:
+        """入队压缩（自动去重：同一文件在本轮监控中只会被压缩一次）。"""
         path_str = str(video_path)
-        if video_path not in self.queue and path_str not in self.active_set:
+        if path_str not in self.ever_enqueued:
+            self.ever_enqueued.add(path_str)
+            self.queue.append(video_path)
+
+    def force_enqueue(self, video_path: Path) -> None:
+        """强制入队（忽略去重历史，用于右键手动强制压缩）。"""
+        path_str = str(video_path)
+        if path_str not in self.active_set:
+            self.ever_enqueued.add(path_str)
             self.queue.append(video_path)
 
     def stop(self) -> None:
@@ -657,7 +668,7 @@ class VideoCompressorWorker(QThread):
 
     def _compress_one(self, compressor: VideoCompressor, target: Path) -> None:
         path_str = str(target)
-        self.active_set.add(path_str)
+        # active_set.add 已在 run() 中 pool.submit 之前完成，此处无需重复添加
         self.file_progress_signal.emit(target, FileStatus.PROCESSING, 0)
         try:
             def file_pct(pct: int):
@@ -686,5 +697,8 @@ class VideoCompressorWorker(QThread):
                 if self._stop_requested:
                     break
 
+                # 在提交到线程池之前就加入 active_set，
+                # 消除 pop 与 _compress_one 之间的去重空窗期
+                self.active_set.add(str(target))
                 fut = pool.submit(self._compress_one, compressor, target)
                 futures.append(fut)
