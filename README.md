@@ -56,7 +56,7 @@
 
 1. 前往 [Releases 页面](https://github.com/giuiu9527/auto-video-compressor/releases/latest) 下载最新版 ZIP
 2. 解压到任意目录
-3. 双击运行 `AutoVideoCompressor.exe`
+3. 双击运行 `IMM-Compressor.exe`
 
 > ⚠️ 已内置 `ffmpeg.exe` 和 `ffprobe.exe`，无需额外安装 FFmpeg
 
@@ -80,7 +80,7 @@ python main.py
 
 ## 🚀 使用说明
 
-1. **启动程序** → 双击 `AutoVideoCompressor.exe` 或 `python main.py`
+1. **启动程序** → 双击 `IMM-Compressor.exe` 或 `python main.py`
 2. **选择监控目录** → 点击「📂 选择目录」按钮，选择要监控的视频根目录
 3. **配置参数**（可选）→ 调整编码模式、质量、冷却时间等参数
 4. **开始监控** → 点击「▶ 开始自动监控与压缩」
@@ -136,10 +136,10 @@ pip install pyinstaller
 # 使用项目 spec 文件打包
 pyinstaller AutoVideoCompressor.spec
 
-# 输出位于 dist/AutoVideoCompressor/AutoVideoCompressor.exe
+# 输出位于 dist/IMM-Compressor/IMM-Compressor.exe
 ```
 
-> ⚠️ **重要**：可执行文件名必须为英文（`AutoVideoCompressor.exe`），中文文件名会导致 PyInstaller C Bootloader 路径编码故障
+> ⚠️ **重要**：可执行文件名必须为英文（`IMM-Compressor.exe`），中文文件名会导致 PyInstaller C Bootloader 路径编码故障
 
 ### 打包注意事项
 

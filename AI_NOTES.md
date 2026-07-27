@@ -9,8 +9,8 @@
 - **项目名称**: 视频自动循环监控压缩工具 (AutoVideoCompressor)
 - **项目仓库**: [giuiu9527/auto-video-compressor](https://github.com/giuiu9527/auto-video-compressor)
 - **运行环境**: Windows 10 / 11, Python 3.12, PySide6 (Qt 6)
-- **打包可执行文件名**: `AutoVideoCompressor.exe`
-- **默认打包输出路径**: `dist/AutoVideoCompressor/AutoVideoCompressor.exe`
+- **打包可执行文件名**: `IMM-Compressor.exe`
+- **默认打包输出路径**: `dist/IMM-Compressor/IMM-Compressor.exe`
 
 ---
 
