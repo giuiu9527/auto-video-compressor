@@ -255,7 +255,7 @@ class MainWindow(QMainWindow):
         self.add_form_row(g3, 0, 0, "输出前缀", self.edit_prefix)
         self.add_form_row(g3, 0, 2, "并发数", self.spin_workers)
 
-        hint = QLabel("压缩后的视频将保存在原文件相同的子目录下，并自动附加输出前缀。")
+        hint = QLabel("压缩后的视频统一保存到源视频所在目录的 YS 文件夹（不存在将自动创建），并自动附加输出前缀。")
         hint.setObjectName("HintLabel"); hint.setWordWrap(True)
         g3.addWidget(hint, 1, 0, 2, 4)
         layout.addWidget(grp_out, 1)

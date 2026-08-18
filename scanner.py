@@ -10,7 +10,7 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from config import VIDEO_EXTS, WatchConfig
+from config import OUTPUT_DIR_NAME, VIDEO_EXTS, WatchConfig
 from utils import check_file_writing_status, probe_duration
 
 
@@ -62,6 +62,32 @@ class FolderWatcherWorker(QThread):
         self.forced_paths.add(path_str)
         self.known_status_map.pop(path_str, None)
 
+    @staticmethod
+    def _is_in_output_dir(path: Path, root_path: Path) -> bool:
+        """压缩输出目录不参与扫描，避免将产物再次作为源视频处理。"""
+        try:
+            parent_parts = path.relative_to(root_path).parts[:-1]
+        except ValueError:
+            parent_parts = path.parts[:-1]
+        return any(part.casefold() == OUTPUT_DIR_NAME.casefold() for part in parent_parts)
+
+    @staticmethod
+    def _has_compressed_output(source: Path, prefix: str) -> bool:
+        """检查 YS 输出目录及旧版同级目录中是否已有该源文件的压缩产物。"""
+        output_stem = f"{prefix}{source.stem}"
+        for directory in (source.parent / OUTPUT_DIR_NAME, source.parent):
+            try:
+                for candidate in directory.iterdir():
+                    if not candidate.is_file():
+                        continue
+                    stem = candidate.stem
+                    # unique_path 生成的重名文件会在基础名称后附加 _数字。
+                    if stem == output_stem or stem.startswith(f"{output_stem}_"):
+                        return True
+            except OSError:
+                continue
+        return False
+
     def scan_once(self) -> list[ScannedFile]:
         cfg = self.watch_cfg
         root_path = Path(cfg.watch_dir)
@@ -82,6 +108,11 @@ class FolderWatcherWorker(QThread):
         for p in candidates:
             if self.is_stopped():
                 break
+
+            # YS 是压缩产物专用目录。递归扫描时必须先整体排除，
+            # 以免输出文件被再次识别为新的待压缩视频。
+            if self._is_in_output_dir(p, root_path):
+                continue
 
             if p.suffix.lower() not in VIDEO_EXTS:
                 continue
@@ -113,23 +144,12 @@ class FolderWatcherWorker(QThread):
             if prefix and (p.name.startswith(prefix) or f"{prefix}" in p.stem):
                 continue
 
-            # 2. 检查目录下是否已存在相应的压缩产物 (ys)original_stem*
-            if prefix:
-                out_stem_prefix = f"{prefix}{p.stem}"
-                already_compressed = False
-                try:
-                    for sibling in p.parent.iterdir():
-                        if sibling.is_file() and sibling.name.startswith(out_stem_prefix):
-                            already_compressed = True
-                            break
-                except Exception:
-                    pass
-
-                if already_compressed:
-                    st, pct = FileStatus.COMPLETED, 100
-                    self.known_status_map[path_str] = (st, pct)
-                    results.append(ScannedFile(p, rel_str, p.stat().st_size / (1024 * 1024), 0.0, st, pct))
-                    continue
+            # 2. 已有 YS 产物（或旧版同级产物）时，标记完成且不重复压缩。
+            if prefix and self._has_compressed_output(p, prefix):
+                st, pct = FileStatus.COMPLETED, 100
+                self.known_status_map[path_str] = (st, pct)
+                results.append(ScannedFile(p, rel_str, p.stat().st_size / (1024 * 1024), 0.0, st, pct))
+                continue
 
             # 3. 检查文件是否正在被录制/写入独占中（多重防护），支持用户手动强制跳过检测
             if path_str not in self.forced_paths:

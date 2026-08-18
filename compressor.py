@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
-from config import CompressionConfig
+from config import CompressionConfig, OUTPUT_DIR_NAME
 from utils import (
     CREATE_NO_WINDOW, ffmpeg_input_prefix, format_time,
     probe_bitrate_kbps, probe_dimensions, probe_duration, run_cmd, unique_path,
@@ -267,7 +267,8 @@ class VideoCompressor:
         status_cb: Optional[Callable[[str, int, float, float], None]] = None,
     ) -> Path:
         cfg = self.cfg
-        out_dir = out_dir or src.parent
+        # 所有压缩产物统一存放在源视频同级的 YS 文件夹中；不存在时自动创建。
+        out_dir = out_dir or src.parent / OUTPUT_DIR_NAME
         out_dir.mkdir(parents=True, exist_ok=True)
 
         crop_filter = ""
