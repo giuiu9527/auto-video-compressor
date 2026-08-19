@@ -88,6 +88,7 @@ class MainWindow(QMainWindow):
 
         self.watcher_worker: Optional[FolderWatcherWorker] = None
         self.compressor_worker: Optional[VideoCompressorWorker] = None
+        self.manual_compressor_worker: Optional[VideoCompressorWorker] = None
 
         self._build_ui()
         self._build_statusbar()
@@ -313,16 +314,20 @@ class MainWindow(QMainWindow):
         self.btn_manual_add_folder = QPushButton("📁 添加文件夹")
         self.btn_manual_remove = QPushButton("移除选中")
         self.btn_manual_clear = QPushButton("清空")
-        self.btn_manual_start = QPushButton("▶ 开始压缩")
+        self.btn_manual_start = QPushButton("▶ 单独开始压缩（不扫描）")
         self.btn_manual_start.setObjectName("PrimaryButton")
+        self.btn_manual_stop = QPushButton("■ 停止手动压缩")
+        self.btn_manual_stop.setObjectName("DangerButton")
+        self.btn_manual_stop.setEnabled(False)
         self.btn_manual_add_files.clicked.connect(self._choose_manual_files)
         self.btn_manual_add_folder.clicked.connect(self._choose_manual_folder)
         self.btn_manual_remove.clicked.connect(self._remove_manual_selected)
         self.btn_manual_clear.clicked.connect(self.manual_list.clear)
         self.btn_manual_start.clicked.connect(self._start_manual_compress)
+        self.btn_manual_stop.clicked.connect(self._stop_manual_compress)
         row.addWidget(self.btn_manual_add_files); row.addWidget(self.btn_manual_add_folder)
         row.addWidget(self.btn_manual_remove); row.addWidget(self.btn_manual_clear)
-        row.addStretch(1); row.addWidget(self.btn_manual_start)
+        row.addStretch(1); row.addWidget(self.btn_manual_start); row.addWidget(self.btn_manual_stop)
         layout.addLayout(row)
         self.tabs.addTab(tab, "手动压缩")
 
@@ -454,13 +459,12 @@ class MainWindow(QMainWindow):
             self.manual_list.takeItem(self.manual_list.row(item))
 
     def _start_compressor_worker(self) -> None:
-        """按当前压缩参数启动共享队列，供自动监控和手动压缩共用。"""
+        """启动自动监控专用的压缩队列。"""
         if self.compressor_worker:
             return
         self.c_cfg = self.collect_compression_config()
         self.compressor_worker = VideoCompressorWorker(self.c_cfg)
         self.compressor_worker.file_progress_signal.connect(self._on_file_progress_update)
-        self.compressor_worker.file_progress_signal.connect(self._on_manual_file_progress_update)
         self.compressor_worker.log_signal.connect(self.log)
         self.compressor_worker.start()
 
@@ -468,17 +472,32 @@ class MainWindow(QMainWindow):
         if not self.manual_list.count():
             QMessageBox.information(self, "手动压缩", "请先拖入或选择至少一个视频文件。")
             return
-        self._start_compressor_worker()
+        if not self.manual_compressor_worker:
+            self.manual_compressor_worker = VideoCompressorWorker(self.collect_compression_config())
+            self.manual_compressor_worker.file_progress_signal.connect(self._on_manual_file_progress_update)
+            self.manual_compressor_worker.log_signal.connect(self.log)
+            self.manual_compressor_worker.start()
         submitted = 0
         for i in range(self.manual_list.count()):
             item = self.manual_list.item(i)
             path = Path(item.data(Qt.UserRole))
             if path.exists() and path.suffix.lower() in VIDEO_EXTS:
-                self.compressor_worker.enqueue(path)
+                self.manual_compressor_worker.enqueue(path)
                 item.setText(f"等待处理  |  {path}")
                 submitted += 1
         self.log(f"▶ 手动压缩已提交 {submitted} 个视频。")
+        self.btn_manual_stop.setEnabled(True)
         self.set_status("手动压缩运行中", "busy")
+
+    def _stop_manual_compress(self) -> None:
+        if self.manual_compressor_worker:
+            self.manual_compressor_worker.stop()
+            self.manual_compressor_worker.wait(2000)
+            self.manual_compressor_worker = None
+        self.btn_manual_stop.setEnabled(False)
+        if not self.watcher_worker:
+            self.set_status("就绪 (手动压缩已停止)", "ok")
+        self.log("■ 手动压缩已停止。")
 
     def _on_manual_file_progress_update(self, src_path: Path, status_str: str, progress: int) -> None:
         key = self._path_key(src_path)
