@@ -9,6 +9,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
+from threading import Lock
 from typing import Optional
 
 from PySide6.QtCore import QThread, Qt, QTimer, Signal
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar,
     QPushButton, QSpinBox, QSplitter, QStatusBar, QTableWidget, QTableWidgetItem,
     QTabWidget, QVBoxLayout, QWidget,
+    QListWidget, QListWidgetItem,
 )
 
 from compressor import (
@@ -27,10 +29,38 @@ from compressor import (
     RATE_MODE_OPTIONS, VIDEO_CODEC_OPTIONS, VideoCompressor,
 )
 from config import (
-    APP_DIR, APP_ICON_PATH, APP_VERSION, SETTINGS_FILE, CompressionConfig, WatchConfig,
+    APP_DIR, APP_ICON_PATH, APP_VERSION, OUTPUT_DIR_NAME, SETTINGS_FILE, VIDEO_EXTS,
+    CompressionConfig, WatchConfig,
 )
 from scanner import FileStatus, FolderWatcherWorker, ScannedFile
 from utils import format_time, now_str
+
+
+class ManualDropList(QListWidget):
+    """接收资源管理器拖入的视频或文件夹。"""
+    files_dropped = Signal(list)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DropOnly)
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event) -> None:
+        paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
+        if paths:
+            self.files_dropped.emit(paths)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
 
 def open_dir_folder(path: Path) -> None:
@@ -54,6 +84,7 @@ class MainWindow(QMainWindow):
 
         self.watch_cfg = WatchConfig()
         self.comp_cfg = CompressionConfig()
+        self.excluded_paths: set[str] = set()
 
         self.watcher_worker: Optional[FolderWatcherWorker] = None
         self.compressor_worker: Optional[VideoCompressorWorker] = None
@@ -186,6 +217,7 @@ class MainWindow(QMainWindow):
         v.addWidget(self.tabs, 1)
 
         self._build_compress_tab()
+        self._build_manual_compress_tab()
         self._build_log_tab()
         return wrap
 
@@ -262,6 +294,38 @@ class MainWindow(QMainWindow):
 
         self.tabs.addTab(tab, "视频压缩参数")
 
+    def _build_manual_compress_tab(self) -> None:
+        tab = QWidget(); layout = QVBoxLayout(tab)
+        layout.setContentsMargins(8, 8, 8, 8); layout.setSpacing(6)
+
+        hint = QLabel("将视频文件或文件夹拖到下方列表；文件夹会递归查找视频。点击“开始压缩”后，文件仍会输出到各自同级的 YS 文件夹。")
+        hint.setObjectName("HintLabel"); hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.manual_list = ManualDropList()
+        self.manual_list.setAlternatingRowColors(True)
+        self.manual_list.setToolTip("拖入视频文件或包含视频的文件夹")
+        self.manual_list.files_dropped.connect(self._add_manual_paths)
+        layout.addWidget(self.manual_list, 1)
+
+        row = QHBoxLayout()
+        self.btn_manual_add_files = QPushButton("➕ 添加视频")
+        self.btn_manual_add_folder = QPushButton("📁 添加文件夹")
+        self.btn_manual_remove = QPushButton("移除选中")
+        self.btn_manual_clear = QPushButton("清空")
+        self.btn_manual_start = QPushButton("▶ 开始压缩")
+        self.btn_manual_start.setObjectName("PrimaryButton")
+        self.btn_manual_add_files.clicked.connect(self._choose_manual_files)
+        self.btn_manual_add_folder.clicked.connect(self._choose_manual_folder)
+        self.btn_manual_remove.clicked.connect(self._remove_manual_selected)
+        self.btn_manual_clear.clicked.connect(self.manual_list.clear)
+        self.btn_manual_start.clicked.connect(self._start_manual_compress)
+        row.addWidget(self.btn_manual_add_files); row.addWidget(self.btn_manual_add_folder)
+        row.addWidget(self.btn_manual_remove); row.addWidget(self.btn_manual_clear)
+        row.addStretch(1); row.addWidget(self.btn_manual_start)
+        layout.addLayout(row)
+        self.tabs.addTab(tab, "手动压缩")
+
     def _build_log_tab(self) -> None:
         tab = QWidget(); layout = QVBoxLayout(tab)
         layout.setContentsMargins(6, 6, 6, 6); layout.setSpacing(4)
@@ -335,6 +399,98 @@ class MainWindow(QMainWindow):
         if path_str:
             open_dir_folder(Path(path_str))
 
+    @staticmethod
+    def _path_key(path: Path) -> str:
+        try:
+            return str(path.resolve()).casefold()
+        except OSError:
+            return str(path.absolute()).casefold()
+
+    @staticmethod
+    def _is_output_path(path: Path) -> bool:
+        return any(part.casefold() == OUTPUT_DIR_NAME.casefold() for part in path.parts[:-1])
+
+    def _add_manual_paths(self, paths: list[Path]) -> None:
+        """将手动选择/拖入的文件或文件夹展开为待压缩视频，自动去重。"""
+        existing = {
+            self._path_key(Path(self.manual_list.item(i).data(Qt.UserRole)))
+            for i in range(self.manual_list.count())
+        }
+        added = 0
+        for path in paths:
+            try:
+                candidates = path.rglob("*") if path.is_dir() else [path]
+                for candidate in candidates:
+                    if (not candidate.is_file() or candidate.suffix.lower() not in VIDEO_EXTS
+                            or self._is_output_path(candidate)):
+                        continue
+                    key = self._path_key(candidate)
+                    if key in existing:
+                        continue
+                    item = QListWidgetItem(f"等待处理  |  {candidate}")
+                    item.setData(Qt.UserRole, str(candidate))
+                    self.manual_list.addItem(item)
+                    existing.add(key)
+                    added += 1
+            except OSError as exc:
+                self.log(f"读取手动添加路径失败 [{path}]: {exc}")
+        if added:
+            self.log(f"手动压缩列表已添加 {added} 个视频。")
+        elif paths:
+            self.log("未添加视频：文件可能不受支持、已在列表中，或位于 YS 输出目录。")
+
+    def _choose_manual_files(self) -> None:
+        filters = "视频文件 (" + " ".join(f"*{ext}" for ext in sorted(VIDEO_EXTS)) + ")"
+        files, _ = QFileDialog.getOpenFileNames(self, "选择要压缩的视频", str(APP_DIR), filters)
+        self._add_manual_paths([Path(p) for p in files])
+
+    def _choose_manual_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "选择包含视频的文件夹", str(APP_DIR))
+        if folder:
+            self._add_manual_paths([Path(folder)])
+
+    def _remove_manual_selected(self) -> None:
+        for item in self.manual_list.selectedItems():
+            self.manual_list.takeItem(self.manual_list.row(item))
+
+    def _start_compressor_worker(self) -> None:
+        """按当前压缩参数启动共享队列，供自动监控和手动压缩共用。"""
+        if self.compressor_worker:
+            return
+        self.c_cfg = self.collect_compression_config()
+        self.compressor_worker = VideoCompressorWorker(self.c_cfg)
+        self.compressor_worker.file_progress_signal.connect(self._on_file_progress_update)
+        self.compressor_worker.file_progress_signal.connect(self._on_manual_file_progress_update)
+        self.compressor_worker.log_signal.connect(self.log)
+        self.compressor_worker.start()
+
+    def _start_manual_compress(self) -> None:
+        if not self.manual_list.count():
+            QMessageBox.information(self, "手动压缩", "请先拖入或选择至少一个视频文件。")
+            return
+        self._start_compressor_worker()
+        submitted = 0
+        for i in range(self.manual_list.count()):
+            item = self.manual_list.item(i)
+            path = Path(item.data(Qt.UserRole))
+            if path.exists() and path.suffix.lower() in VIDEO_EXTS:
+                self.compressor_worker.enqueue(path)
+                item.setText(f"等待处理  |  {path}")
+                submitted += 1
+        self.log(f"▶ 手动压缩已提交 {submitted} 个视频。")
+        self.set_status("手动压缩运行中", "busy")
+
+    def _on_manual_file_progress_update(self, src_path: Path, status_str: str, progress: int) -> None:
+        key = self._path_key(src_path)
+        for i in range(self.manual_list.count()):
+            item = self.manual_list.item(i)
+            path = Path(item.data(Qt.UserRole))
+            if self._path_key(path) == key:
+                text = {FileStatus.PROCESSING: f"压缩中 {progress}%", FileStatus.COMPLETED: "✅ 已完成",
+                        FileStatus.FAILED: "❌ 压缩失败"}.get(status_str, status_str)
+                item.setText(f"{text}  |  {path}")
+                break
+
     def _on_scan_now_clicked(self) -> None:
         w_cfg = self.collect_watch_config()
         if not w_cfg.watch_dir or not Path(w_cfg.watch_dir).exists():
@@ -361,6 +517,7 @@ class MainWindow(QMainWindow):
             skip_prefix=self.edit_prefix.text().strip() or "(ys)",
             auto_start_compress=self.chk_auto_start.isChecked(),
             min_stable_sec=self.spin_min_stable.value(),
+            excluded_paths=sorted(self.excluded_paths),
         )
 
     def collect_compression_config(self) -> CompressionConfig:
@@ -391,6 +548,7 @@ class MainWindow(QMainWindow):
         self.spin_interval.setValue(w.interval_sec)
         self.spin_min_stable.setValue(getattr(w, "min_stable_sec", 180))
         self.chk_auto_start.setChecked(w.auto_start_compress)
+        self.excluded_paths = {self._path_key(Path(p)) for p in getattr(w, "excluded_paths", [])}
 
         idx = self.combo_v_codec.findData(c.video_codec)
         self.combo_v_codec.setCurrentIndex(max(0, idx))
@@ -543,13 +701,43 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
         act_force = menu.addAction("⚡ 强制立即提交压缩 (跳过冷却等待)")
+        act_exclude = menu.addAction("🚫 排除选中项 (不再扫描)")
         act_open_dir = menu.addAction("📂 打开所在文件夹")
 
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
         if action == act_force:
             self._force_compress_selected_rows(selected_rows)
+        elif action == act_exclude:
+            self._exclude_selected_rows(selected_rows)
         elif action == act_open_dir:
             self._open_selected_rows_folder(selected_rows)
+
+    def _exclude_selected_rows(self, selected_rows: set[int]) -> None:
+        watch_dir = Path(self.edit_watch_dir.text().strip())
+        if not watch_dir.exists():
+            return
+        excluded = 0
+        for r in selected_rows:
+            rel_item = self.table.item(r, 1)
+            if not rel_item:
+                continue
+            file_path = watch_dir / rel_item.text()
+            if not file_path.exists():
+                continue
+            key = self._path_key(file_path)
+            if key not in self.excluded_paths:
+                self.excluded_paths.add(key)
+                excluded += 1
+            if self.watcher_worker:
+                self.watcher_worker.exclude_path(file_path)
+            if self.compressor_worker and self.compressor_worker.cancel_queued(file_path):
+                self.log(f"已从压缩队列移除: {file_path.name}")
+        if not excluded:
+            return
+        self.save_settings(silent=True)
+        self.log(f"🚫 已排除 {excluded} 个视频；后续扫描将不再显示或压缩它们。")
+        worker = self.watcher_worker or FolderWatcherWorker(self.collect_watch_config())
+        self._on_scan_completed(worker.scan_once())
 
     def _force_compress_selected_rows(self, selected_rows: set[int]) -> None:
         watch_dir = Path(self.edit_watch_dir.text().strip())
@@ -594,16 +782,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "路径错误", "请先选择有效的监控根目录！")
             return
 
-        self.c_cfg = self.collect_compression_config()
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.set_status("监控运行中", "busy")
 
-        # 启动压缩执行器
-        self.compressor_worker = VideoCompressorWorker(self.c_cfg)
-        self.compressor_worker.file_progress_signal.connect(self._on_file_progress_update)
-        self.compressor_worker.log_signal.connect(self.log)
-        self.compressor_worker.start()
+        # 启动压缩执行器（手动压缩与自动监控共享同一队列）
+        self._start_compressor_worker()
 
         # 启动文件夹扫描器
         self.watcher_worker = FolderWatcherWorker(w_cfg)
@@ -649,21 +833,35 @@ class VideoCompressorWorker(QThread):
         self.queue: list[Path] = []
         self.active_set: set[str] = set()
         self.ever_enqueued: set[str] = set()  # 记录所有曾入队的文件，防止重复压缩
+        self._queue_lock = Lock()
         self._stop_requested = False
 
     def enqueue(self, video_path: Path) -> None:
         """入队压缩（自动去重：同一文件在本轮监控中只会被压缩一次）。"""
         path_str = str(video_path)
-        if path_str not in self.ever_enqueued:
-            self.ever_enqueued.add(path_str)
-            self.queue.append(video_path)
+        with self._queue_lock:
+            if path_str not in self.ever_enqueued:
+                self.ever_enqueued.add(path_str)
+                self.queue.append(video_path)
 
     def force_enqueue(self, video_path: Path) -> None:
         """强制入队（忽略去重历史，用于右键手动强制压缩）。"""
         path_str = str(video_path)
-        if path_str not in self.active_set:
-            self.ever_enqueued.add(path_str)
-            self.queue.append(video_path)
+        with self._queue_lock:
+            if path_str not in self.active_set:
+                self.ever_enqueued.add(path_str)
+                self.queue.append(video_path)
+
+    def cancel_queued(self, video_path: Path) -> bool:
+        """移除尚未启动的任务；正在压缩的文件不会被强制中断。"""
+        path_str = str(video_path)
+        with self._queue_lock:
+            original_count = len(self.queue)
+            self.queue = [p for p in self.queue if str(p) != path_str]
+            if len(self.queue) < original_count:
+                self.ever_enqueued.discard(path_str)
+                return True
+        return False
 
     def stop(self) -> None:
         self._stop_requested = True
@@ -694,11 +892,11 @@ class VideoCompressorWorker(QThread):
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = []
             while not self._stop_requested:
-                if not self.queue:
+                with self._queue_lock:
+                    target = self.queue.pop(0) if self.queue else None
+                if target is None:
                     time.sleep(0.5)
                     continue
-
-                target = self.queue.pop(0)
                 if self._stop_requested:
                     break
 

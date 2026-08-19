@@ -45,6 +45,15 @@ class FolderWatcherWorker(QThread):
         self._stop_lock = Lock()
         self.known_status_map: dict[str, tuple[str, int]] = {}  # filepath_str -> (status, progress)
         self.forced_paths: set[str] = set()
+        self.excluded_paths = {self._path_key(Path(p)) for p in watch_cfg.excluded_paths}
+
+    @staticmethod
+    def _path_key(path: Path) -> str:
+        """用于 Windows 下不区分大小写的稳定路径比较。"""
+        try:
+            return str(path.resolve()).casefold()
+        except OSError:
+            return str(path.absolute()).casefold()
 
     def stop(self) -> None:
         with self._stop_lock:
@@ -60,6 +69,13 @@ class FolderWatcherWorker(QThread):
     def force_process(self, file_path: Path) -> None:
         path_str = str(file_path)
         self.forced_paths.add(path_str)
+        self.known_status_map.pop(path_str, None)
+
+    def exclude_path(self, file_path: Path) -> None:
+        """将文件加入本次及后续持久化配置使用的排除集合。"""
+        path_str = str(file_path)
+        self.excluded_paths.add(self._path_key(file_path))
+        self.forced_paths.discard(path_str)
         self.known_status_map.pop(path_str, None)
 
     @staticmethod
@@ -112,6 +128,9 @@ class FolderWatcherWorker(QThread):
             # YS 是压缩产物专用目录。递归扫描时必须先整体排除，
             # 以免输出文件被再次识别为新的待压缩视频。
             if self._is_in_output_dir(p, root_path):
+                continue
+
+            if self._path_key(p) in self.excluded_paths:
                 continue
 
             if p.suffix.lower() not in VIDEO_EXTS:
