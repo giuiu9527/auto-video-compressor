@@ -417,6 +417,11 @@ class MainWindow(QMainWindow):
     def _is_output_path(path: Path) -> bool:
         return any(part.casefold() == OUTPUT_DIR_NAME.casefold() for part in path.parts[:-1])
 
+    def _has_manual_compressed_output(self, path: Path) -> bool:
+        """手动任务沿用自动监控的 YS 产物检测，防止重复压缩。"""
+        prefix = self.edit_prefix.text().strip() or "(ys)"
+        return FolderWatcherWorker._has_compressed_output(path, prefix)
+
     def _add_manual_paths(self, paths: list[Path]) -> None:
         """将手动选择/拖入的文件或文件夹展开为待压缩视频，自动去重。"""
         existing = {
@@ -424,6 +429,7 @@ class MainWindow(QMainWindow):
             for i in range(self.manual_list.count())
         }
         added = 0
+        already_compressed = 0
         for path in paths:
             try:
                 candidates = path.rglob("*") if path.is_dir() else [path]
@@ -434,7 +440,12 @@ class MainWindow(QMainWindow):
                     key = self._path_key(candidate)
                     if key in existing:
                         continue
-                    item = QListWidgetItem(f"等待处理  |  {candidate}")
+                    if self._has_manual_compressed_output(candidate):
+                        label = "⏩ 已跳过 (已有 YS 产物)"
+                        already_compressed += 1
+                    else:
+                        label = "等待处理"
+                    item = QListWidgetItem(f"{label}  |  {candidate}")
                     item.setData(Qt.UserRole, str(candidate))
                     self.manual_list.addItem(item)
                     existing.add(key)
@@ -443,6 +454,8 @@ class MainWindow(QMainWindow):
                 self.log(f"读取手动添加路径失败 [{path}]: {exc}")
         if added:
             self.log(f"手动压缩列表已添加 {added} 个视频。")
+        if already_compressed:
+            self.log(f"其中 {already_compressed} 个视频已有 YS 压缩产物，已标记为跳过。")
         elif paths:
             self.log("未添加视频：文件可能不受支持、已在列表中，或位于 YS 输出目录。")
 
@@ -486,20 +499,30 @@ class MainWindow(QMainWindow):
         if not self.manual_list.count():
             QMessageBox.information(self, "手动压缩", "请先拖入或选择至少一个视频文件。")
             return
+        pending: list[tuple[QListWidgetItem, Path]] = []
+        skipped = 0
+        for i in range(self.manual_list.count()):
+            item = self.manual_list.item(i)
+            path = Path(item.data(Qt.UserRole))
+            if path.exists() and path.suffix.lower() in VIDEO_EXTS:
+                if self._has_manual_compressed_output(path):
+                    item.setText(f"⏩ 已跳过 (已有 YS 产物)  |  {path}")
+                    skipped += 1
+                else:
+                    pending.append((item, path))
+        if not pending:
+            self.log(f"手动压缩未提交任务：{skipped} 个视频已有 YS 压缩产物。")
+            return
         if not self.manual_compressor_worker:
             self.manual_compressor_worker = VideoCompressorWorker(self.collect_compression_config())
             self.manual_compressor_worker.file_progress_signal.connect(self._on_manual_file_progress_update)
             self.manual_compressor_worker.queue_idle_signal.connect(self._on_manual_queue_idle)
             self.manual_compressor_worker.log_signal.connect(self.log)
             self.manual_compressor_worker.start()
-        submitted = 0
-        for i in range(self.manual_list.count()):
-            item = self.manual_list.item(i)
-            path = Path(item.data(Qt.UserRole))
-            if path.exists() and path.suffix.lower() in VIDEO_EXTS:
-                self.manual_compressor_worker.enqueue(path)
-                item.setText(f"等待处理  |  {path}")
-                submitted += 1
+        for item, path in pending:
+            self.manual_compressor_worker.enqueue(path)
+            item.setText(f"等待处理  |  {path}")
+        submitted = len(pending)
         self.log(f"▶ 手动压缩已提交 {submitted} 个视频。")
         self.btn_manual_stop.setEnabled(True)
         self.set_status("手动压缩运行中", "busy")

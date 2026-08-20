@@ -1,7 +1,7 @@
 # 🎬 AutoVideoCompressor — 视频自动循环监控压缩工具
 
 <p align="center">
-  <img src="https://img.shields.io/badge/版本-v1.1.1-blue?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/版本-v1.1.2-blue?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/平台-Windows_10%2F11-green?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/badge/框架-PySide6_(Qt_6)-orange?style=flat-square" alt="Framework">
   <img src="https://img.shields.io/badge/编码器-FFmpeg_+_NVENC-red?style=flat-square" alt="Encoder">
