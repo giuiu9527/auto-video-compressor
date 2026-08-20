@@ -306,7 +306,9 @@ class MainWindow(QMainWindow):
         self.manual_list = ManualDropList()
         self.manual_list.setAlternatingRowColors(True)
         self.manual_list.setToolTip("拖入视频文件或包含视频的文件夹")
+        self.manual_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.manual_list.files_dropped.connect(self._add_manual_paths)
+        self.manual_list.customContextMenuRequested.connect(self._show_manual_context_menu)
         layout.addWidget(self.manual_list, 1)
 
         row = QHBoxLayout()
@@ -456,7 +458,19 @@ class MainWindow(QMainWindow):
 
     def _remove_manual_selected(self) -> None:
         for item in self.manual_list.selectedItems():
+            path = Path(item.data(Qt.UserRole))
+            # 已提交但尚未启动的任务也一并取消，避免“删除后仍压缩”。
+            if self.manual_compressor_worker:
+                self.manual_compressor_worker.cancel_queued(path)
             self.manual_list.takeItem(self.manual_list.row(item))
+
+    def _show_manual_context_menu(self, pos) -> None:
+        if not self.manual_list.selectedItems():
+            return
+        menu = QMenu(self)
+        act_delete = menu.addAction("🗑 删除选中项")
+        if menu.exec(self.manual_list.viewport().mapToGlobal(pos)) == act_delete:
+            self._remove_manual_selected()
 
     def _start_compressor_worker(self) -> None:
         """启动自动监控专用的压缩队列。"""
@@ -475,6 +489,7 @@ class MainWindow(QMainWindow):
         if not self.manual_compressor_worker:
             self.manual_compressor_worker = VideoCompressorWorker(self.collect_compression_config())
             self.manual_compressor_worker.file_progress_signal.connect(self._on_manual_file_progress_update)
+            self.manual_compressor_worker.queue_idle_signal.connect(self._on_manual_queue_idle)
             self.manual_compressor_worker.log_signal.connect(self.log)
             self.manual_compressor_worker.start()
         submitted = 0
@@ -509,6 +524,13 @@ class MainWindow(QMainWindow):
                         FileStatus.FAILED: "❌ 压缩失败"}.get(status_str, status_str)
                 item.setText(f"{text}  |  {path}")
                 break
+
+    def _on_manual_queue_idle(self) -> None:
+        """手动任务全部完成（成功或失败）后自动释放独立压缩线程。"""
+        if not self.manual_compressor_worker:
+            return
+        self.log("✓ 手动压缩任务已全部完成，已自动停止。")
+        self._stop_manual_compress()
 
     def _on_scan_now_clicked(self) -> None:
         w_cfg = self.collect_watch_config()
@@ -845,6 +867,7 @@ class MainWindow(QMainWindow):
 class VideoCompressorWorker(QThread):
     file_progress_signal = Signal(object, str, int)
     log_signal = Signal(str)
+    queue_idle_signal = Signal()
 
     def __init__(self, c_cfg: CompressionConfig) -> None:
         super().__init__()
@@ -853,6 +876,9 @@ class VideoCompressorWorker(QThread):
         self.active_set: set[str] = set()
         self.ever_enqueued: set[str] = set()  # 记录所有曾入队的文件，防止重复压缩
         self._queue_lock = Lock()
+        self._active_lock = Lock()
+        self._has_received_work = False
+        self._idle_reported = False
         self._stop_requested = False
 
     def enqueue(self, video_path: Path) -> None:
@@ -862,14 +888,18 @@ class VideoCompressorWorker(QThread):
             if path_str not in self.ever_enqueued:
                 self.ever_enqueued.add(path_str)
                 self.queue.append(video_path)
+                self._has_received_work = True
+                self._idle_reported = False
 
     def force_enqueue(self, video_path: Path) -> None:
         """强制入队（忽略去重历史，用于右键手动强制压缩）。"""
         path_str = str(video_path)
-        with self._queue_lock:
+        with self._queue_lock, self._active_lock:
             if path_str not in self.active_set:
                 self.ever_enqueued.add(path_str)
                 self.queue.append(video_path)
+                self._has_received_work = True
+                self._idle_reported = False
 
     def cancel_queued(self, video_path: Path) -> bool:
         """移除尚未启动的任务；正在压缩的文件不会被强制中断。"""
@@ -902,7 +932,8 @@ class VideoCompressorWorker(QThread):
             self.emit_log(f"压缩任务失败 [{target.name}]: {exc}")
             self.file_progress_signal.emit(target, FileStatus.FAILED, 0)
         finally:
-            self.active_set.discard(path_str)
+            with self._active_lock:
+                self.active_set.discard(path_str)
 
     def run(self) -> None:
         compressor = VideoCompressor(self.c_cfg, self.emit_log, lambda: self._stop_requested)
@@ -914,6 +945,11 @@ class VideoCompressorWorker(QThread):
                 with self._queue_lock:
                     target = self.queue.pop(0) if self.queue else None
                 if target is None:
+                    with self._active_lock:
+                        has_active_work = bool(self.active_set)
+                    if self._has_received_work and not has_active_work and not self._idle_reported:
+                        self._idle_reported = True
+                        self.queue_idle_signal.emit()
                     time.sleep(0.5)
                     continue
                 if self._stop_requested:
@@ -921,6 +957,7 @@ class VideoCompressorWorker(QThread):
 
                 # 在提交到线程池之前就加入 active_set，
                 # 消除 pop 与 _compress_one 之间的去重空窗期
-                self.active_set.add(str(target))
+                with self._active_lock:
+                    self.active_set.add(str(target))
                 fut = pool.submit(self._compress_one, compressor, target)
                 futures.append(fut)
