@@ -419,7 +419,7 @@ class MainWindow(QMainWindow):
 
     def _has_manual_compressed_output(self, path: Path) -> bool:
         """手动任务沿用自动监控的 YS 产物检测，防止重复压缩。"""
-        prefix = self.edit_prefix.text().strip() or "(ys)"
+        prefix = self.edit_prefix.text().strip()
         return FolderWatcherWorker._has_compressed_output(path, prefix)
 
     def _add_manual_paths(self, paths: list[Path]) -> None:
@@ -578,7 +578,7 @@ class MainWindow(QMainWindow):
             recursive=self.chk_recursive.isChecked(),
             enable_timer=self.chk_enable_timer.isChecked(),
             interval_sec=self.spin_interval.value(),
-            skip_prefix=self.edit_prefix.text().strip() or "(ys)",
+            skip_prefix=self.edit_prefix.text().strip(),
             auto_start_compress=self.chk_auto_start.isChecked(),
             min_stable_sec=self.spin_min_stable.value(),
             excluded_paths=sorted(self.excluded_paths),
@@ -599,7 +599,7 @@ class MainWindow(QMainWindow):
             extra_bottom=self.spin_crop_bottom.value(),
             extra_left=self.spin_crop_left.value(),
             extra_right=self.spin_crop_right.value(),
-            output_prefix=self.edit_prefix.text().strip() or "(ys)",
+            output_prefix=self.edit_prefix.text().strip(),
             max_workers=self.spin_workers.value(),
             trim_end=self.chk_trim_end.isChecked(),
             trim_end_sec=self.spin_trim_end_sec.value(),

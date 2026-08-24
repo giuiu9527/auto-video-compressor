@@ -9,7 +9,7 @@ from pathlib import Path
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".flv", ".ts", ".m4v", ".webm"}
 OUTPUT_DIR_NAME = "YS"
 
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 
 
 def app_root_dir() -> Path:
