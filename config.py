@@ -9,7 +9,7 @@ from pathlib import Path
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".flv", ".ts", ".m4v", ".webm"}
 OUTPUT_DIR_NAME = "YS"
 
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 
 
 def app_root_dir() -> Path:
@@ -78,8 +78,9 @@ class WatchConfig:
     recursive: bool = True
     enable_timer: bool = True
     interval_sec: int = 30
-    skip_prefix: str = "(ys)"
     auto_start_compress: bool = True
+    # 忽略 YS 中已有的同名 MP4，仍然提交压缩。
+    force_compress: bool = False
     min_stable_sec: int = 180
     # 用户从监控列表中手动排除的视频（绝对路径）。
     excluded_paths: list[str] = field(default_factory=list)

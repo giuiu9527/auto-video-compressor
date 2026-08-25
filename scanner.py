@@ -18,7 +18,7 @@ class FileStatus:
     WAITING = "等待处理"
     PROCESSING = "🎬 压缩中"
     COMPLETED = "✅ 已完成"
-    SKIPPED_ALREADY = "⏩ 已跳过 (已包含产物)"
+    SKIPPED_ALREADY = "⏩ 已跳过 (YS 已有同名 MP4)"
     SKIPPED_WRITING = "⏳ 暂跳过 (正在录制/写入)"
     FAILED = "❌ 压缩失败"
 
@@ -67,9 +67,20 @@ class FolderWatcherWorker(QThread):
         self.known_status_map[str(file_path)] = (status, progress)
 
     def force_process(self, file_path: Path) -> None:
+        """让指定文件绕过已有产物与写入冷却检查。"""
         path_str = str(file_path)
         self.forced_paths.add(path_str)
         self.known_status_map.pop(path_str, None)
+
+    def set_force_compress(self, enabled: bool) -> None:
+        """实时更新强制压缩设置，并清除由已有产物产生的跳过缓存。"""
+        self.watch_cfg.force_compress = enabled
+        if enabled:
+            self.known_status_map = {
+                path: value
+                for path, value in self.known_status_map.items()
+                if value[0] != FileStatus.SKIPPED_ALREADY
+            }
 
     def exclude_path(self, file_path: Path) -> None:
         """将文件加入本次及后续持久化配置使用的排除集合。"""
@@ -88,20 +99,42 @@ class FolderWatcherWorker(QThread):
         return any(part.casefold() == OUTPUT_DIR_NAME.casefold() for part in parent_parts)
 
     @staticmethod
-    def _has_compressed_output(source: Path, prefix: str) -> bool:
-        """检查 YS 输出目录及旧版同级目录中是否已有该源文件的压缩产物。"""
-        output_stem = f"{prefix}{source.stem}"
-        for directory in (source.parent / OUTPUT_DIR_NAME, source.parent):
-            try:
-                for candidate in directory.iterdir():
-                    if not candidate.is_file():
-                        continue
-                    stem = candidate.stem
-                    # unique_path 生成的重名文件会在基础名称后附加 _数字。
-                    if stem == output_stem or stem.startswith(f"{output_stem}_"):
+    def _has_compressed_output(source: Path) -> bool:
+        """检查源文件同级的 YS 中是否已有同名 MP4，匹配时忽略输出前缀。"""
+        output_dir = source.parent / OUTPUT_DIR_NAME
+        source_stem = source.stem.casefold()
+        try:
+            # 如果目录中同时有 video.mkv 和 myvideo.mkv，myvideo.mp4 应只归属于
+            # 后者，避免把另一个源文件名误当作 video 的输出前缀。
+            sibling_source_stems = {
+                item.stem.casefold()
+                for item in source.parent.iterdir()
+                if item.is_file() and item.suffix.casefold() in VIDEO_EXTS
+            }
+            for candidate in output_dir.iterdir():
+                if not candidate.is_file() or candidate.suffix.casefold() != ".mp4":
+                    continue
+
+                candidate_stem = candidate.stem.casefold()
+                # 先按完整文件名匹配，避免把源文件名本身的 _数字误删；随后再兼容
+                # unique_path 为重名产物追加的 _数字。
+                stem_variants = [candidate_stem]
+                base, separator, counter = candidate_stem.rpartition("_")
+                if separator and counter.isdigit():
+                    stem_variants.append(base)
+
+                for comparable_stem in stem_variants:
+                    if comparable_stem == source_stem:
                         return True
-            except OSError:
-                continue
+                    if not comparable_stem.endswith(source_stem):
+                        continue
+                    if (comparable_stem in sibling_source_stems
+                            and comparable_stem != source_stem):
+                        continue
+                    # YS 是专用输出目录，源文件名前的任意文本都视为输出前缀。
+                    return True
+        except OSError:
+            pass
         return False
 
     def scan_once(self) -> list[ScannedFile]:
@@ -158,19 +191,16 @@ class FolderWatcherWorker(QThread):
                 ))
                 continue
 
-            # 1. 自动滤除前缀 (ys) 开头的压缩产物文件（不显示在列表里）
-            prefix = cfg.skip_prefix.strip()
-            if prefix and (p.name.startswith(prefix) or f"{prefix}" in p.stem):
-                continue
-
-            # 2. 已有 YS 产物（或旧版同级产物）时，标记完成且不重复压缩。
-            if prefix and self._has_compressed_output(p, prefix):
-                st, pct = FileStatus.COMPLETED, 100
+            # 1. 仅检查源视频同级 YS 目录中的同名 MP4；输出前缀不参与判定。
+            # 单文件右键强制和全局强制压缩均可绕过该检查。
+            if (not cfg.force_compress and path_str not in self.forced_paths
+                    and self._has_compressed_output(p)):
+                st, pct = FileStatus.SKIPPED_ALREADY, 100
                 self.known_status_map[path_str] = (st, pct)
                 results.append(ScannedFile(p, rel_str, p.stat().st_size / (1024 * 1024), 0.0, st, pct))
                 continue
 
-            # 3. 检查文件是否正在被录制/写入独占中（多重防护），支持用户手动强制跳过检测
+            # 2. 检查文件是否正在被录制/写入独占中（多重防护），支持用户手动强制跳过检测
             if path_str not in self.forced_paths:
                 is_locked, remaining_sec, reason = check_file_writing_status(p, cfg.min_stable_sec)
                 if is_locked:
@@ -181,7 +211,7 @@ class FolderWatcherWorker(QThread):
                     results.append(ScannedFile(p, rel_str, p.stat().st_size / (1024 * 1024), 0.0, st_desc, 0))
                     continue
 
-            # 4. 正常可压缩文件
+            # 3. 正常可压缩文件
             dur = probe_duration(p)
             size_mb = p.stat().st_size / (1024 * 1024)
             st, pct = FileStatus.WAITING, 0

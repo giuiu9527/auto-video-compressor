@@ -29,6 +29,7 @@ crash_log.txt
 # Temporary / Debug scripts
 verify_*.py
 test_*.py
+!test_scanner.py
 
 # PyInstaller intermediate
 *.manifest

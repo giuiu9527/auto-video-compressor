@@ -288,9 +288,15 @@ class MainWindow(QMainWindow):
         self.add_form_row(g3, 0, 0, "输出前缀", self.edit_prefix)
         self.add_form_row(g3, 0, 2, "并发数", self.spin_workers)
 
-        hint = QLabel("压缩后的视频统一保存到源视频所在目录的 YS 文件夹（不存在将自动创建），并自动附加输出前缀。")
+        self.chk_force_compress = QCheckBox("强制压缩（忽略已有 YS 产物）")
+        self.chk_force_compress.setToolTip("开启后，即使 YS 文件夹中已有同名 MP4，也会再次压缩并生成带数字后缀的新文件")
+        self.chk_force_compress.setStyleSheet("QCheckBox{font-weight:600; color:#c0392b;}")
+        self.chk_force_compress.toggled.connect(self._on_force_compress_toggled)
+        g3.addWidget(self.chk_force_compress, 1, 0, 1, 4)
+
+        hint = QLabel("产物统一保存到源视频同级的 YS 文件夹；排重只比较源文件名与 MP4 文件名，忽略输出前缀。")
         hint.setObjectName("HintLabel"); hint.setWordWrap(True)
-        g3.addWidget(hint, 1, 0, 2, 4)
+        g3.addWidget(hint, 2, 0, 1, 4)
         layout.addWidget(grp_out, 1)
 
         self.tabs.addTab(tab, "视频压缩参数")
@@ -419,8 +425,17 @@ class MainWindow(QMainWindow):
 
     def _has_manual_compressed_output(self, path: Path) -> bool:
         """手动任务沿用自动监控的 YS 产物检测，防止重复压缩。"""
-        prefix = self.edit_prefix.text().strip()
-        return FolderWatcherWorker._has_compressed_output(path, prefix)
+        if self.chk_force_compress.isChecked():
+            return False
+        return FolderWatcherWorker._has_compressed_output(path)
+
+    def _on_force_compress_toggled(self, enabled: bool) -> None:
+        """让运行中的扫描器立即采用强制压缩设置。"""
+        if self.watcher_worker:
+            self.watcher_worker.set_force_compress(enabled)
+        mode = "开启" if enabled else "关闭"
+        if hasattr(self, "log_box"):
+            self.log(f"强制压缩已{mode}。")
 
     def _add_manual_paths(self, paths: list[Path]) -> None:
         """将手动选择/拖入的文件或文件夹展开为待压缩视频，自动去重。"""
@@ -578,8 +593,8 @@ class MainWindow(QMainWindow):
             recursive=self.chk_recursive.isChecked(),
             enable_timer=self.chk_enable_timer.isChecked(),
             interval_sec=self.spin_interval.value(),
-            skip_prefix=self.edit_prefix.text().strip(),
             auto_start_compress=self.chk_auto_start.isChecked(),
+            force_compress=self.chk_force_compress.isChecked(),
             min_stable_sec=self.spin_min_stable.value(),
             excluded_paths=sorted(self.excluded_paths),
         )
@@ -612,6 +627,7 @@ class MainWindow(QMainWindow):
         self.spin_interval.setValue(w.interval_sec)
         self.spin_min_stable.setValue(getattr(w, "min_stable_sec", 180))
         self.chk_auto_start.setChecked(w.auto_start_compress)
+        self.chk_force_compress.setChecked(getattr(w, "force_compress", False))
         self.excluded_paths = {self._path_key(Path(p)) for p in getattr(w, "excluded_paths", [])}
 
         idx = self.combo_v_codec.findData(c.video_codec)
@@ -764,7 +780,7 @@ class MainWindow(QMainWindow):
             return
 
         menu = QMenu(self)
-        act_force = menu.addAction("⚡ 强制立即提交压缩 (跳过冷却等待)")
+        act_force = menu.addAction("⚡ 强制立即提交压缩 (忽略已有产物与冷却)")
         act_exclude = menu.addAction("🚫 排除选中项 (不再扫描)")
         act_open_dir = menu.addAction("📂 打开所在文件夹")
 
@@ -819,7 +835,7 @@ class MainWindow(QMainWindow):
                     file_path = watch_dir / name_item.text()
 
             if file_path.exists():
-                self.log(f"⚡ 手动强制解除冷却等待，提交压缩: {file_path.name}")
+                self.log(f"⚡ 手动强制忽略已有产物与冷却，提交压缩: {file_path.name}")
                 if self.watcher_worker:
                     self.watcher_worker.force_process(file_path)
                 if self.compressor_worker:
