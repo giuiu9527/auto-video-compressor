@@ -16,7 +16,11 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 def _bundled_bin_dir() -> Path:
     """返回随程序分发的 bin 目录(打包前/后都对)。"""
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent / "bin"
+        app_dir = Path(sys.executable).resolve().parent
+        for candidate in (app_dir / "bin", app_dir / "_internal" / "bin"):
+            if (candidate / "ffmpeg.exe").exists() and (candidate / "ffprobe.exe").exists():
+                return candidate
+        return app_dir / "bin"
     return Path(__file__).resolve().parent / "bin"
 
 

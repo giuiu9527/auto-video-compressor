@@ -36,31 +36,62 @@ from scanner import FileStatus, FolderWatcherWorker, ScannedFile
 from utils import format_time, now_str
 
 
-class ManualDropList(QListWidget):
+class LocalPathDropMixin:
+    """为控件提供稳定的本地文件/文件夹拖放支持。"""
+
+    @staticmethod
+    def _drop_paths(event) -> list[Path]:
+        mime_data = event.mimeData()
+        if not mime_data or not mime_data.hasUrls():
+            return []
+        return [Path(url.toLocalFile()) for url in mime_data.urls()
+                if url.isLocalFile() and url.toLocalFile()]
+
+    def dragEnterEvent(self, event) -> None:
+        if self._drop_paths(event):
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if self._drop_paths(event):
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:
+        paths = self._drop_paths(event)
+        if paths:
+            self.files_dropped.emit(paths)
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+
+class ManualDropList(LocalPathDropMixin, QListWidget):
     """接收资源管理器拖入的视频或文件夹。"""
     files_dropped = Signal(list)
 
     def __init__(self) -> None:
         super().__init__()
         self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDragEnabled(False)
         self.setDragDropMode(QAbstractItemView.DropOnly)
+        self.setDefaultDropAction(Qt.CopyAction)
+        self.setDropIndicatorShown(True)
 
-    def dragEnterEvent(self, event) -> None:
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
 
-    def dragMoveEvent(self, event) -> None:
-        self.dragEnterEvent(event)
+class ManualDropTab(LocalPathDropMixin, QWidget):
+    """允许拖到手动压缩页的空白区域，而不局限于列表内部。"""
+    files_dropped = Signal(list)
 
-    def dropEvent(self, event) -> None:
-        paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
-        if paths:
-            self.files_dropped.emit(paths)
-            event.acceptProposedAction()
-        else:
-            event.ignore()
+    def __init__(self) -> None:
+        super().__init__()
+        self.setAcceptDrops(True)
 
 
 def open_dir_folder(path: Path) -> None:
@@ -87,13 +118,17 @@ class MainWindow(QMainWindow):
         self.excluded_paths: set[str] = set()
 
         self.watcher_worker: Optional[FolderWatcherWorker] = None
+        self.scan_once_worker: Optional[FolderWatcherWorker] = None
         self.compressor_worker: Optional[VideoCompressorWorker] = None
         self.manual_compressor_worker: Optional[VideoCompressorWorker] = None
+        self._post_show_tasks_started = False
 
         self._build_ui()
         self._build_statusbar()
         self.load_settings(silent=True)
         self.set_status("就绪", "ok")
+        # 窗口先完成显示，再启动网络检查和目录扫描，避免大目录阻塞启动界面。
+        QTimer.singleShot(150, self._run_post_show_tasks)
 
     @staticmethod
     def double_spin(min_v, max_v, step, value, decimals=2) -> QDoubleSpinBox:
@@ -302,8 +337,9 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(tab, "视频压缩参数")
 
     def _build_manual_compress_tab(self) -> None:
-        tab = QWidget(); layout = QVBoxLayout(tab)
+        tab = ManualDropTab(); layout = QVBoxLayout(tab)
         layout.setContentsMargins(8, 8, 8, 8); layout.setSpacing(6)
+        tab.files_dropped.connect(self._add_manual_paths)
 
         hint = QLabel("将视频文件或文件夹拖到下方列表；文件夹会递归查找视频。点击“开始压缩”后，文件仍会输出到各自同级的 YS 文件夹。")
         hint.setObjectName("HintLabel"); hint.setWordWrap(True)
@@ -471,7 +507,7 @@ class MainWindow(QMainWindow):
             self.log(f"手动压缩列表已添加 {added} 个视频。")
         if already_compressed:
             self.log(f"其中 {already_compressed} 个视频已有 YS 压缩产物，已标记为跳过。")
-        elif paths:
+        if not added and paths:
             self.log("未添加视频：文件可能不受支持、已在列表中，或位于 YS 输出目录。")
 
     def _choose_manual_files(self) -> None:
@@ -576,9 +612,40 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "路径错误", "请先选择或输入有效的监控根目录。")
             return
         self.log(f"手动发起扫盘目录: {w_cfg.watch_dir}")
-        worker = self.watcher_worker or FolderWatcherWorker(w_cfg)
-        scanned = worker.scan_once()
-        self._on_scan_completed(scanned)
+        self._start_one_shot_scan(w_cfg)
+
+    def _start_one_shot_scan(self, w_cfg: WatchConfig) -> None:
+        """在独立线程执行一次扫描，避免目录遍历和 ffprobe 阻塞界面。"""
+        if self.scan_once_worker and self.scan_once_worker.isRunning():
+            self.log("扫盘任务正在运行，本次请求已忽略。")
+            return
+
+        w_cfg.enable_timer = False
+        worker = FolderWatcherWorker(w_cfg)
+        if self.watcher_worker:
+            worker.known_status_map = dict(self.watcher_worker.known_status_map)
+        worker.scan_completed_signal.connect(self._on_scan_completed)
+        worker.log_signal.connect(self.log)
+        worker.finished.connect(lambda: self._on_one_shot_scan_finished(worker))
+        self.scan_once_worker = worker
+        worker.start()
+
+    def _on_one_shot_scan_finished(self, worker: FolderWatcherWorker) -> None:
+        if self.scan_once_worker is worker:
+            self.scan_once_worker = None
+        worker.deleteLater()
+
+    def _run_post_show_tasks(self) -> None:
+        """窗口显示后再执行可延迟的启动任务。"""
+        if self._post_show_tasks_started:
+            return
+        self._post_show_tasks_started = True
+        self.check_updates(manual=False)
+
+        w_cfg = self.collect_watch_config()
+        if w_cfg.watch_dir and Path(w_cfg.watch_dir).exists():
+            self.log(f"后台加载监控目录: {w_cfg.watch_dir}")
+            self._start_one_shot_scan(w_cfg)
 
     def _clear_table(self) -> None:
         self.table.setRowCount(0)
@@ -679,10 +746,6 @@ class MainWindow(QMainWindow):
             c_defaults.update({k: v for k, v in data.get("compression", {}).items() if k in c_defaults})
             self.apply_config(WatchConfig(**w_defaults), CompressionConfig(**c_defaults))
             self.log(f"已自动加载配置文件: {SETTINGS_FILE}")
-            if self.edit_watch_dir.text().strip() and Path(self.edit_watch_dir.text().strip()).exists():
-                self._on_scan_now_clicked()
-            # 自动后台检查更新
-            self.check_updates(manual=False)
         except Exception as exc:
             self.log(f"配置文件加载异常: {exc}")
 

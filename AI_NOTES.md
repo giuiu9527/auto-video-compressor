@@ -31,6 +31,7 @@
 - **多线程解耦**: 压缩任务使用 `ThreadPoolExecutor` 后台执行，完全分离 PySide6 GUI 主线程。
 - **Qt Signal 通信**: `VideoCompressorWorker` 通过 `file_progress_signal` 和 `log_signal` 将进度和日志回调给主窗口，彻底避免 C++ Segfault 崩溃。
 - **并发锁与重复去重**: 维护 `active_set` 集合，防止同一文件被扫盘器和 Watchdog 监听器重复添加或并发压缩。
+- **非阻塞启动**: 配置只在构造阶段读取；目录扫描和版本检查在窗口显示后启动，一次性扫盘也始终使用后台线程。
 
 ---
 

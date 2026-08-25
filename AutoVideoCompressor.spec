@@ -1,15 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
-
-datas_s, binaries_s, hiddenimports_s = collect_all('shiboken6')
-
-datas = datas_s + [('bin', 'bin'), ('icon.ico', '.')]
-binaries = binaries_s
-hiddenimports = hiddenimports_s + [
+datas = [('bin', 'bin'), ('icon.ico', '.')]
+binaries = []
+hiddenimports = [
     'PySide6.QtCore',
     'PySide6.QtGui',
     'PySide6.QtWidgets',
-    'PySide6.QtNetwork',
 ]
 
 block_cipher = None
