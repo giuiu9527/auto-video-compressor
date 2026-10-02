@@ -24,16 +24,20 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem,
 )
 
-from compressor import (
-    AUDIO_CODEC_OPTIONS, OUTPUT_FORMAT_OPTIONS, PRESET_OPTIONS,
-    RATE_MODE_OPTIONS, VIDEO_CODEC_OPTIONS, VideoCompressor,
-)
+from compressor import VideoCompressor
 from config import (
     APP_DIR, APP_ICON_PATH, APP_VERSION, OUTPUT_DIR_NAME, SETTINGS_FILE, VIDEO_EXTS,
     CompressionConfig, WatchConfig,
 )
 from scanner import FileStatus, FolderWatcherWorker, ScannedFile
+from params_form import CompressionParamsForm
+from templates import TemplateManagerDialog, TemplateStore, ask_template_name
 from utils import format_time, now_str
+
+# 手动压缩列表项状态（存于 Qt.UserRole + 1）
+ST_WAITING, ST_QUEUED, ST_DONE, ST_FAILED, ST_SKIPPED = "waiting", "queued", "done", "failed", "skipped"
+ROLE_STATE = Qt.UserRole + 1
+FOLLOW_MAIN = "__main__"  # 手动压缩“跟随主界面参数”
 
 
 class LocalPathDropMixin:
@@ -109,13 +113,14 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"视频自动循环监控压缩工具 v{APP_VERSION}")
-        self.resize(1080, 620)
+        self.resize(1080, 700)
         if APP_ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
 
         self.watch_cfg = WatchConfig()
         self.comp_cfg = CompressionConfig()
         self.excluded_paths: set[str] = set()
+        self.template_store = TemplateStore()
 
         self.watcher_worker: Optional[FolderWatcherWorker] = None
         self.scan_once_worker: Optional[FolderWatcherWorker] = None
@@ -125,6 +130,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_statusbar()
+        self._refresh_template_combos()
         self.load_settings(silent=True)
         self.set_status("就绪", "ok")
         # 窗口先完成显示，再启动网络检查和目录扫描，避免大目录阻塞启动界面。
@@ -155,7 +161,7 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(self._build_table_panel())
         splitter.addWidget(self._build_tabs_panel())
-        splitter.setSizes([260, 180])
+        splitter.setSizes([230, 250])
 
         main.addLayout(self._build_run_row())
 
@@ -261,58 +267,8 @@ class MainWindow(QMainWindow):
         tab = QWidget(); layout = QHBoxLayout(tab)
         layout.setContentsMargins(6, 6, 6, 6); layout.setSpacing(6)
 
-        # 左侧: 编码与码率
-        grp_codec = QGroupBox("编码与码率")
-        g1 = QGridLayout(grp_codec)
-        g1.setHorizontalSpacing(8); g1.setVerticalSpacing(4)
-        self.combo_v_codec = QComboBox()
-        for k, val in VIDEO_CODEC_OPTIONS.items(): self.combo_v_codec.addItem(val, userData=k)
-        self.combo_a_codec = QComboBox()
-        for k, val in AUDIO_CODEC_OPTIONS.items(): self.combo_a_codec.addItem(val, userData=k)
-        self.combo_format = QComboBox(); self.combo_format.addItems(OUTPUT_FORMAT_OPTIONS)
-        self.combo_rate_mode = QComboBox()
-        for k, val in RATE_MODE_OPTIONS.items(): self.combo_rate_mode.addItem(val, userData=k)
-        self.combo_preset = QComboBox(); self.combo_preset.addItems(PRESET_OPTIONS)
-        self.spin_cq = QSpinBox(); self.spin_cq.setRange(0, 51); self.spin_cq.setValue(23)
-        self.spin_bitrate = QSpinBox(); self.spin_bitrate.setRange(100, 50000); self.spin_bitrate.setValue(2500)
-        self.spin_a_bitrate = QSpinBox(); self.spin_a_bitrate.setRange(32, 320); self.spin_a_bitrate.setValue(128)
-
-        self.add_form_row(g1, 0, 0, "格式", self.combo_format)
-        self.add_form_row(g1, 0, 2, "视频编码", self.combo_v_codec)
-        self.add_form_row(g1, 1, 0, "码率模式", self.combo_rate_mode)
-        self.add_form_row(g1, 1, 2, "预设", self.combo_preset)
-        self.add_form_row(g1, 2, 0, "CQ/CRF", self.spin_cq)
-        self.add_form_row(g1, 2, 2, "比特率(k)", self.spin_bitrate)
-        self.add_form_row(g1, 3, 0, "音频编码", self.combo_a_codec)
-        self.add_form_row(g1, 3, 2, "音频码率(k)", self.spin_a_bitrate)
-        layout.addWidget(grp_codec, 1)
-
-        # 中间: 去黑边与尾部剪切
-        grp_cut = QGroupBox("✂ 去黑边 / 尾部剪切")
-        g2 = QGridLayout(grp_cut)
-        g2.setHorizontalSpacing(8); g2.setVerticalSpacing(4)
-        self.chk_auto_crop = QCheckBox("自动去黑边 (cropdetect 采样)")
-        self.chk_auto_crop.setStyleSheet("QCheckBox{font-weight:600; color:#1f6fb2;}")
-        g2.addWidget(self.chk_auto_crop, 0, 0, 1, 4)
-
-        self.spin_crop_top = QSpinBox(); self.spin_crop_top.setRange(0, 4000)
-        self.spin_crop_bottom = QSpinBox(); self.spin_crop_bottom.setRange(0, 4000)
-        self.spin_crop_left = QSpinBox(); self.spin_crop_left.setRange(0, 4000)
-        self.spin_crop_right = QSpinBox(); self.spin_crop_right.setRange(0, 4000)
-        self.add_form_row(g2, 1, 0, "额外 上(px)", self.spin_crop_top)
-        self.add_form_row(g2, 1, 2, "额外 下(px)", self.spin_crop_bottom)
-        self.add_form_row(g2, 2, 0, "额外 左(px)", self.spin_crop_left)
-        self.add_form_row(g2, 2, 2, "额外 右(px)", self.spin_crop_right)
-
-        self.chk_trim_end = QCheckBox("启用尾部剪切 (提前指定秒数结束)")
-        self.chk_trim_end.setStyleSheet("QCheckBox{font-weight:600; color:#1f6fb2;}")
-        self.spin_trim_end_sec = self.double_spin(0.1, 3600.0, 0.5, 7.0, 1)
-        self.spin_trim_end_sec.setEnabled(False)
-        self.chk_trim_end.toggled.connect(self.spin_trim_end_sec.setEnabled)
-        g2.addWidget(self.chk_trim_end, 3, 0, 1, 2)
-        self.add_form_row(g2, 3, 2, "提前结束(s)", self.spin_trim_end_sec)
-
-        layout.addWidget(grp_cut, 1)
+        self.params_form = CompressionParamsForm()
+        layout.addWidget(self.params_form, 2)
 
         # 右侧: 前缀与并发
         grp_out = QGroupBox("前缀与并发")
@@ -327,11 +283,23 @@ class MainWindow(QMainWindow):
         self.chk_force_compress.setToolTip("开启后，即使 YS 文件夹中已有同名 MP4，也会再次压缩并生成带数字后缀的新文件")
         self.chk_force_compress.setStyleSheet("QCheckBox{font-weight:600; color:#c0392b;}")
         self.chk_force_compress.toggled.connect(self._on_force_compress_toggled)
-        g3.addWidget(self.chk_force_compress, 1, 0, 1, 4)
+        g3.addWidget(self.chk_force_compress, 2, 0, 1, 4)
+
+        self.combo_template = QComboBox()
+        self.combo_template.setToolTip("选择模板后立即套用到左侧参数")
+        self.combo_template.activated.connect(self._on_template_activated)
+        self.btn_save_template = QPushButton("💾 存为模板")
+        self.btn_manage_templates = QPushButton("⚙ 管理模板")
+        self.btn_save_template.clicked.connect(self._save_current_as_template)
+        self.btn_manage_templates.clicked.connect(self._open_template_manager)
+        self.add_form_row(g3, 1, 0, "参数模板", self.combo_template)
+        tpl_row = QHBoxLayout()
+        tpl_row.addWidget(self.btn_save_template); tpl_row.addWidget(self.btn_manage_templates)
+        g3.addLayout(tpl_row, 1, 2, 1, 2)
 
         hint = QLabel("产物统一保存到源视频同级的 YS 文件夹；排重只比较源文件名与 MP4 文件名，忽略输出前缀。")
         hint.setObjectName("HintLabel"); hint.setWordWrap(True)
-        g3.addWidget(hint, 2, 0, 1, 4)
+        g3.addWidget(hint, 3, 0, 1, 4)
         layout.addWidget(grp_out, 1)
 
         self.tabs.addTab(tab, "视频压缩参数")
@@ -344,6 +312,17 @@ class MainWindow(QMainWindow):
         hint = QLabel("将视频文件或文件夹拖到下方列表；文件夹会递归查找视频。点击“开始压缩”后，文件仍会输出到各自同级的 YS 文件夹。")
         hint.setObjectName("HintLabel"); hint.setWordWrap(True)
         layout.addWidget(hint)
+
+        opt = QHBoxLayout()
+        opt.addWidget(QLabel("压缩模板:"))
+        self.combo_manual_template = QComboBox()
+        self.combo_manual_template.setMinimumWidth(240)
+        self.combo_manual_template.setToolTip("手动压缩使用的参数模板；新提交的任务按提交时的选择为准")
+        opt.addWidget(self.combo_manual_template)
+        self.chk_manual_auto_submit = QCheckBox("压缩进行中，新拖入/添加的视频自动加入队列")
+        self.chk_manual_auto_submit.setChecked(True)
+        opt.addSpacing(12); opt.addWidget(self.chk_manual_auto_submit); opt.addStretch(1)
+        layout.addLayout(opt)
 
         self.manual_list = ManualDropList()
         self.manual_list.setAlternatingRowColors(True)
@@ -358,7 +337,7 @@ class MainWindow(QMainWindow):
         self.btn_manual_add_folder = QPushButton("📁 添加文件夹")
         self.btn_manual_remove = QPushButton("移除选中")
         self.btn_manual_clear = QPushButton("清空")
-        self.btn_manual_start = QPushButton("▶ 单独开始压缩（不扫描）")
+        self.btn_manual_start = QPushButton("▶ 开始 / 提交待处理（不扫描）")
         self.btn_manual_start.setObjectName("PrimaryButton")
         self.btn_manual_stop = QPushButton("■ 停止手动压缩")
         self.btn_manual_stop.setObjectName("DangerButton")
@@ -366,7 +345,7 @@ class MainWindow(QMainWindow):
         self.btn_manual_add_files.clicked.connect(self._choose_manual_files)
         self.btn_manual_add_folder.clicked.connect(self._choose_manual_folder)
         self.btn_manual_remove.clicked.connect(self._remove_manual_selected)
-        self.btn_manual_clear.clicked.connect(self.manual_list.clear)
+        self.btn_manual_clear.clicked.connect(self._clear_manual_list)
         self.btn_manual_start.clicked.connect(self._start_manual_compress)
         self.btn_manual_stop.clicked.connect(self._stop_manual_compress)
         row.addWidget(self.btn_manual_add_files); row.addWidget(self.btn_manual_add_folder)
@@ -473,13 +452,26 @@ class MainWindow(QMainWindow):
         if hasattr(self, "log_box"):
             self.log(f"强制压缩已{mode}。")
 
+    def _set_manual_item(self, item: QListWidgetItem, state: str, text: str) -> None:
+        path = item.data(Qt.UserRole)
+        item.setData(ROLE_STATE, state)
+        item.setText(f"{text}  |  {path}")
+
+    def _clear_manual_list(self) -> None:
+        """清空列表；已提交但未启动的任务一并取消。"""
+        if self.manual_compressor_worker:
+            for i in range(self.manual_list.count()):
+                self.manual_compressor_worker.cancel_queued(Path(self.manual_list.item(i).data(Qt.UserRole)))
+        self.manual_list.clear()
+
     def _add_manual_paths(self, paths: list[Path]) -> None:
-        """将手动选择/拖入的文件或文件夹展开为待压缩视频，自动去重。"""
+        """将手动选择/拖入的文件或文件夹展开为待压缩视频，自动去重。
+        若手动压缩正在运行且勾选了自动加入，新增视频会直接入队。"""
         existing = {
             self._path_key(Path(self.manual_list.item(i).data(Qt.UserRole)))
             for i in range(self.manual_list.count())
         }
-        added = 0
+        added: list[QListWidgetItem] = []
         already_compressed = 0
         for path in paths:
             try:
@@ -491,24 +483,26 @@ class MainWindow(QMainWindow):
                     key = self._path_key(candidate)
                     if key in existing:
                         continue
+                    item = QListWidgetItem()
+                    item.setData(Qt.UserRole, str(candidate))
                     if self._has_manual_compressed_output(candidate):
-                        label = "⏩ 已跳过 (已有 YS 产物)"
+                        self._set_manual_item(item, ST_SKIPPED, "⏩ 已跳过 (已有 YS 产物)")
                         already_compressed += 1
                     else:
-                        label = "等待处理"
-                    item = QListWidgetItem(f"{label}  |  {candidate}")
-                    item.setData(Qt.UserRole, str(candidate))
+                        self._set_manual_item(item, ST_WAITING, "等待处理")
                     self.manual_list.addItem(item)
                     existing.add(key)
-                    added += 1
+                    added.append(item)
             except OSError as exc:
                 self.log(f"读取手动添加路径失败 [{path}]: {exc}")
         if added:
-            self.log(f"手动压缩列表已添加 {added} 个视频。")
+            self.log(f"手动压缩列表已添加 {len(added)} 个视频。")
         if already_compressed:
             self.log(f"其中 {already_compressed} 个视频已有 YS 压缩产物，已标记为跳过。")
         if not added and paths:
             self.log("未添加视频：文件可能不受支持、已在列表中，或位于 YS 输出目录。")
+        if added and self.manual_compressor_worker and self.chk_manual_auto_submit.isChecked():
+            self._submit_manual_items(added)
 
     def _choose_manual_files(self) -> None:
         filters = "视频文件 (" + " ".join(f"*{ext}" for ext in sorted(VIDEO_EXTS)) + ")"
@@ -546,43 +540,69 @@ class MainWindow(QMainWindow):
         self.compressor_worker.log_signal.connect(self.log)
         self.compressor_worker.start()
 
+    def _manual_config(self) -> CompressionConfig:
+        """手动压缩当前选择的参数：模板覆盖主界面参数（前缀/并发数沿用主界面）。"""
+        base = self.collect_compression_config()
+        name = self.combo_manual_template.currentData()
+        if name and name != FOLLOW_MAIN:
+            return self.template_store.apply_to(name, base)
+        return base
+
+    def _submit_manual_items(self, items: list[QListWidgetItem]) -> int:
+        """把等待中的条目提交给手动压缩线程（按当前模板），返回实际提交数。"""
+        worker = self.manual_compressor_worker
+        if not worker:
+            return 0
+        cfg = self._manual_config()
+        submitted = skipped = 0
+        for item in items:
+            if item.data(ROLE_STATE) != ST_WAITING:
+                continue
+            path = Path(item.data(Qt.UserRole))
+            if not path.exists() or path.suffix.lower() not in VIDEO_EXTS:
+                continue
+            if self._has_manual_compressed_output(path):
+                self._set_manual_item(item, ST_SKIPPED, "⏩ 已跳过 (已有 YS 产物)")
+                skipped += 1
+                continue
+            worker.enqueue(path, cfg)
+            self._set_manual_item(item, ST_QUEUED, "排队中")
+            submitted += 1
+        if submitted:
+            self.log(f"▶ 手动压缩已提交 {submitted} 个视频 (模板: {self.combo_manual_template.currentText()})。")
+            self.btn_manual_stop.setEnabled(True)
+            self.set_status("手动压缩运行中", "busy")
+        elif skipped:
+            self.log(f"手动压缩未提交任务：{skipped} 个视频已有 YS 压缩产物。")
+        return submitted
+
     def _start_manual_compress(self) -> None:
         if not self.manual_list.count():
             QMessageBox.information(self, "手动压缩", "请先拖入或选择至少一个视频文件。")
             return
-        pending: list[tuple[QListWidgetItem, Path]] = []
-        skipped = 0
-        for i in range(self.manual_list.count()):
-            item = self.manual_list.item(i)
-            path = Path(item.data(Qt.UserRole))
-            if path.exists() and path.suffix.lower() in VIDEO_EXTS:
-                if self._has_manual_compressed_output(path):
-                    item.setText(f"⏩ 已跳过 (已有 YS 产物)  |  {path}")
-                    skipped += 1
-                else:
-                    pending.append((item, path))
-        if not pending:
-            self.log(f"手动压缩未提交任务：{skipped} 个视频已有 YS 压缩产物。")
+        items = [self.manual_list.item(i) for i in range(self.manual_list.count())]
+        if not any(it.data(ROLE_STATE) == ST_WAITING for it in items):
+            self.log("手动压缩：没有待处理的视频。")
             return
         if not self.manual_compressor_worker:
-            self.manual_compressor_worker = VideoCompressorWorker(self.collect_compression_config())
-            self.manual_compressor_worker.file_progress_signal.connect(self._on_manual_file_progress_update)
-            self.manual_compressor_worker.queue_idle_signal.connect(self._on_manual_queue_idle)
-            self.manual_compressor_worker.log_signal.connect(self.log)
-            self.manual_compressor_worker.start()
-        for item, path in pending:
-            self.manual_compressor_worker.enqueue(path)
-            item.setText(f"等待处理  |  {path}")
-        submitted = len(pending)
-        self.log(f"▶ 手动压缩已提交 {submitted} 个视频。")
-        self.btn_manual_stop.setEnabled(True)
-        self.set_status("手动压缩运行中", "busy")
+            worker = VideoCompressorWorker(self._manual_config())
+            worker.file_progress_signal.connect(self._on_manual_file_progress_update)
+            worker.queue_idle_signal.connect(self._on_manual_queue_idle)
+            worker.log_signal.connect(self.log)
+            self.manual_compressor_worker = worker
+            worker.start()
+        self._submit_manual_items(items)
 
     def _stop_manual_compress(self) -> None:
         if self.manual_compressor_worker:
             self.manual_compressor_worker.stop()
             self.manual_compressor_worker.wait(2000)
             self.manual_compressor_worker = None
+        # 未完成的条目恢复为待处理，之后可重新提交
+        for i in range(self.manual_list.count()):
+            item = self.manual_list.item(i)
+            if item.data(ROLE_STATE) == ST_QUEUED:
+                self._set_manual_item(item, ST_WAITING, "等待处理")
         self.btn_manual_stop.setEnabled(False)
         if not self.watcher_worker:
             self.set_status("就绪 (手动压缩已停止)", "ok")
@@ -592,16 +612,20 @@ class MainWindow(QMainWindow):
         key = self._path_key(src_path)
         for i in range(self.manual_list.count()):
             item = self.manual_list.item(i)
-            path = Path(item.data(Qt.UserRole))
-            if self._path_key(path) == key:
-                text = {FileStatus.PROCESSING: f"压缩中 {progress}%", FileStatus.COMPLETED: "✅ 已完成",
-                        FileStatus.FAILED: "❌ 压缩失败"}.get(status_str, status_str)
-                item.setText(f"{text}  |  {path}")
+            if self._path_key(Path(item.data(Qt.UserRole))) == key:
+                if status_str == FileStatus.COMPLETED:
+                    self._set_manual_item(item, ST_DONE, "✅ 已完成")
+                elif status_str == FileStatus.FAILED:
+                    self._set_manual_item(item, ST_FAILED, "❌ 压缩失败")
+                else:
+                    self._set_manual_item(item, ST_QUEUED, f"压缩中 {progress}%")
                 break
 
     def _on_manual_queue_idle(self) -> None:
         """手动任务全部完成（成功或失败）后自动释放独立压缩线程。"""
-        if not self.manual_compressor_worker:
+        worker = self.manual_compressor_worker
+        # 信号排队期间可能又有新视频入队，此时不能停止线程。
+        if not worker or worker.is_busy():
             return
         self.log("✓ 手动压缩任务已全部完成，已自动停止。")
         self._stop_manual_compress()
@@ -667,25 +691,11 @@ class MainWindow(QMainWindow):
         )
 
     def collect_compression_config(self) -> CompressionConfig:
-        return CompressionConfig(
-            video_codec=self.combo_v_codec.currentData() or "h264_nvenc",
-            audio_codec=self.combo_a_codec.currentData() or "aac",
-            output_format=self.combo_format.currentText() or "mp4",
-            rate_mode=self.combo_rate_mode.currentData() or "cq",
-            cq_value=self.spin_cq.value(),
-            bitrate_kbps=self.spin_bitrate.value(),
-            audio_bitrate_kbps=self.spin_a_bitrate.value(),
-            preset=self.combo_preset.currentText() or "p4",
-            auto_crop=self.chk_auto_crop.isChecked(),
-            extra_top=self.spin_crop_top.value(),
-            extra_bottom=self.spin_crop_bottom.value(),
-            extra_left=self.spin_crop_left.value(),
-            extra_right=self.spin_crop_right.value(),
+        base = CompressionConfig(
             output_prefix=self.edit_prefix.text().strip(),
             max_workers=self.spin_workers.value(),
-            trim_end=self.chk_trim_end.isChecked(),
-            trim_end_sec=self.spin_trim_end_sec.value(),
         )
+        return self.params_form.get_config(base)
 
     def apply_config(self, w: WatchConfig, c: CompressionConfig) -> None:
         self.edit_watch_dir.setText(w.watch_dir)
@@ -697,30 +707,46 @@ class MainWindow(QMainWindow):
         self.chk_force_compress.setChecked(getattr(w, "force_compress", False))
         self.excluded_paths = {self._path_key(Path(p)) for p in getattr(w, "excluded_paths", [])}
 
-        idx = self.combo_v_codec.findData(c.video_codec)
-        self.combo_v_codec.setCurrentIndex(max(0, idx))
-        idx = self.combo_a_codec.findData(c.audio_codec)
-        self.combo_a_codec.setCurrentIndex(max(0, idx))
-        idx = self.combo_format.findText(c.output_format)
-        self.combo_format.setCurrentIndex(max(0, idx))
-        idx = self.combo_rate_mode.findData(c.rate_mode)
-        self.combo_rate_mode.setCurrentIndex(max(0, idx))
-        idx = self.combo_preset.findText(c.preset)
-        self.combo_preset.setCurrentIndex(max(0, idx))
-
-        self.spin_cq.setValue(c.cq_value)
-        self.spin_bitrate.setValue(c.bitrate_kbps)
-        self.spin_a_bitrate.setValue(c.audio_bitrate_kbps)
-        self.chk_auto_crop.setChecked(c.auto_crop)
-        self.spin_crop_top.setValue(c.extra_top)
-        self.spin_crop_bottom.setValue(c.extra_bottom)
-        self.spin_crop_left.setValue(c.extra_left)
-        self.spin_crop_right.setValue(c.extra_right)
+        self.params_form.set_config(c)
         self.edit_prefix.setText(c.output_prefix)
         self.spin_workers.setValue(c.max_workers)
-        self.chk_trim_end.setChecked(c.trim_end)
-        self.spin_trim_end_sec.setValue(c.trim_end_sec)
-        self.spin_trim_end_sec.setEnabled(c.trim_end)
+
+    # ── 压缩模板 ──────────────────────────────────────────
+    def _refresh_template_combos(self) -> None:
+        """重建主界面/手动压缩的模板下拉框，并尽量保留原选择。"""
+        names = self.template_store.names()
+        manual_prev = self.combo_manual_template.currentData()
+        self.combo_template.clear()
+        self.combo_template.addItem("— 选择模板套用 —", userData=None)
+        self.combo_manual_template.clear()
+        self.combo_manual_template.addItem("跟随主界面参数", userData=FOLLOW_MAIN)
+        for n in names:
+            self.combo_template.addItem(n, userData=n)
+            self.combo_manual_template.addItem(n, userData=n)
+        idx = self.combo_manual_template.findData(manual_prev)
+        self.combo_manual_template.setCurrentIndex(max(0, idx))
+
+    def _on_template_activated(self, _index: int) -> None:
+        name = self.combo_template.currentData()
+        if not name:
+            return
+        self.params_form.set_config(
+            self.template_store.apply_to(name, self.collect_compression_config()))
+        self.log(f"已套用压缩模板: {name}（点“保存配置”后成为默认参数；自动监控需重新启动生效）")
+
+    def _save_current_as_template(self) -> None:
+        name = ask_template_name(self, self.template_store, "存为模板")
+        if not name:
+            return
+        self.template_store.put(name, self.collect_compression_config())
+        self._refresh_template_combos()
+        self.log(f"已保存压缩模板: {name}")
+
+    def _open_template_manager(self) -> None:
+        dlg = TemplateManagerDialog(self.template_store, self.collect_compression_config(), self)
+        dlg.exec()
+        if dlg.changed:
+            self._refresh_template_combos()
 
     def save_settings(self, silent: bool = False) -> None:
         try:
@@ -977,18 +1003,30 @@ class VideoCompressorWorker(QThread):
         self.queue: list[Path] = []
         self.active_set: set[str] = set()
         self.ever_enqueued: set[str] = set()  # 记录所有曾入队的文件，防止重复压缩
+        self.task_cfgs: dict[str, CompressionConfig] = {}  # 任务专用参数（如手动模板）
         self._queue_lock = Lock()
         self._active_lock = Lock()
         self._has_received_work = False
         self._idle_reported = False
         self._stop_requested = False
 
-    def enqueue(self, video_path: Path) -> None:
-        """入队压缩（自动去重：同一文件在本轮监控中只会被压缩一次）。"""
+    def is_busy(self) -> bool:
+        """队列中仍有待处理或正在压缩的任务。"""
+        with self._queue_lock:
+            if self.queue:
+                return True
+        with self._active_lock:
+            return bool(self.active_set)
+
+    def enqueue(self, video_path: Path, cfg: Optional[CompressionConfig] = None) -> None:
+        """入队压缩（自动去重：同一文件在本轮监控中只会被压缩一次）。
+        cfg 为该任务专用的压缩参数，缺省使用线程创建时的参数。"""
         path_str = str(video_path)
         with self._queue_lock:
             if path_str not in self.ever_enqueued:
                 self.ever_enqueued.add(path_str)
+                if cfg is not None:
+                    self.task_cfgs[path_str] = cfg
                 self.queue.append(video_path)
                 self._has_received_work = True
                 self._idle_reported = False
@@ -1009,6 +1047,7 @@ class VideoCompressorWorker(QThread):
         with self._queue_lock:
             original_count = len(self.queue)
             self.queue = [p for p in self.queue if str(p) != path_str]
+            self.task_cfgs.pop(path_str, None)
             if len(self.queue) < original_count:
                 self.ever_enqueued.discard(path_str)
                 return True
@@ -1020,8 +1059,11 @@ class VideoCompressorWorker(QThread):
     def emit_log(self, msg: str) -> None:
         self.log_signal.emit(msg)
 
-    def _compress_one(self, compressor: VideoCompressor, target: Path) -> None:
+    def _compress_one(self, target: Path) -> None:
         path_str = str(target)
+        with self._queue_lock:
+            cfg = self.task_cfgs.pop(path_str, None) or self.c_cfg
+        compressor = VideoCompressor(cfg, self.emit_log, lambda: self._stop_requested)
         # active_set.add 已在 run() 中 pool.submit 之前完成，此处无需重复添加
         self.file_progress_signal.emit(target, FileStatus.PROCESSING, 0)
         try:
@@ -1038,7 +1080,6 @@ class VideoCompressorWorker(QThread):
                 self.active_set.discard(path_str)
 
     def run(self) -> None:
-        compressor = VideoCompressor(self.c_cfg, self.emit_log, lambda: self._stop_requested)
         workers = max(1, self.c_cfg.max_workers)
         import time
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -1061,5 +1102,5 @@ class VideoCompressorWorker(QThread):
                 # 消除 pop 与 _compress_one 之间的去重空窗期
                 with self._active_lock:
                     self.active_set.add(str(target))
-                fut = pool.submit(self._compress_one, compressor, target)
+                fut = pool.submit(self._compress_one, target)
                 futures.append(fut)
