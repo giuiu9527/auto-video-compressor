@@ -13,6 +13,10 @@ from threading import Lock
 from typing import Optional
 
 from PySide6.QtCore import QThread, Qt, QTimer, Signal
+from server_updater import (
+    ServerUpdateCheckWorker, UpdateServerSettingsDialog, apply_server_update_and_restart,
+    load_update_config,
+)
 from updater import UpdateCheckWorker, UpdateProgressDialog, apply_zip_update_and_restart
 from PySide6.QtGui import QColor, QFont, QIcon, QTextCursor
 from PySide6.QtWidgets import (
@@ -177,9 +181,19 @@ class MainWindow(QMainWindow):
         badge = QLabel(f"v{APP_VERSION}"); badge.setObjectName("HeaderBadge")
         badge.setAlignment(Qt.AlignCenter)
         self.btn_check_update = QPushButton("🚀 检查更新")
+        self.btn_check_update.setToolTip("更新方式 1：从 GitHub Release 检查更新")
         self.btn_check_update.clicked.connect(lambda: self.check_updates(manual=True))
+        self.btn_server_update = QPushButton("🌐 服务器更新")
+        self.btn_server_update.setToolTip("更新方式 2：从自建更新服务器检查更新")
+        self.btn_server_update.clicked.connect(self.check_server_updates)
+        self.btn_server_settings = QPushButton("⚙")
+        self.btn_server_settings.setFixedWidth(30)
+        self.btn_server_settings.setToolTip("更新服务器设置")
+        self.btn_server_settings.clicked.connect(self._open_update_server_settings)
         lay.addLayout(title_box, 1)
         lay.addWidget(self.btn_check_update, 0, Qt.AlignRight | Qt.AlignVCenter)
+        lay.addWidget(self.btn_server_update, 0, Qt.AlignRight | Qt.AlignVCenter)
+        lay.addWidget(self.btn_server_settings, 0, Qt.AlignRight | Qt.AlignVCenter)
         lay.addWidget(badge, 0, Qt.AlignRight | Qt.AlignVCenter)
         return frame
 
@@ -841,6 +855,48 @@ class MainWindow(QMainWindow):
                     self.log("更新已取消或下载失败。")
         elif getattr(self, "manual_check", False):
             QMessageBox.information(self, "更新检查", f"当前已是最新版本 (v{APP_VERSION})！")
+
+    # ── 更新方式 2：自建更新服务器 ──────────────────────────
+    def _open_update_server_settings(self) -> None:
+        UpdateServerSettingsDialog(self).exec()
+
+    def check_server_updates(self) -> None:
+        server, channel = load_update_config()
+        self.btn_server_update.setEnabled(False)
+        self.log(f"检查服务器更新: {server}{channel}")
+        self.server_update_worker = ServerUpdateCheckWorker(server, channel, APP_VERSION)
+        self.server_update_worker.finished_signal.connect(self._on_server_update_checked)
+        self.server_update_worker.start()
+
+    def _on_server_update_checked(self, ok: bool, has_update: bool, new_ver: str, notes: str,
+                                  archive_url: str, sha_url: str, error: str) -> None:
+        self.btn_server_update.setEnabled(True)
+        server, _ = load_update_config()
+        if not ok:
+            box = QMessageBox(QMessageBox.Warning, "服务器更新检查失败",
+                              f"{error}\n\n当前更新服务器: {server}\n可能服务器地址已变更，可点“修改服务器地址”。",
+                              parent=self)
+            btn_edit = box.addButton("修改服务器地址", QMessageBox.ActionRole)
+            box.addButton("关闭", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is btn_edit:
+                self._open_update_server_settings()
+            return
+        if not has_update:
+            QMessageBox.information(self, "更新检查", f"当前已是最新版本 (v{APP_VERSION})！\n服务器版本: v{new_ver.lstrip('vV')}")
+            return
+        msg = (f"发现新版本 [{new_ver}]！\n\n当前版本: v{APP_VERSION}\n最新版本: {new_ver}\n\n"
+               f"更新日志:\n{notes}\n\n是否立即下载升级？")
+        if QMessageBox.question(self, "版本更新提示", msg, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        dlg = UpdateProgressDialog(archive_url, new_ver, parent=self, sha_url=sha_url)
+        if dlg.exec() and dlg.success:
+            try:
+                apply_server_update_and_restart(dlg.downloaded_zip_path)
+            except Exception as exc:
+                QMessageBox.critical(self, "更新失败", f"应用更新失败: {exc}")
+        else:
+            self.log("服务器更新已取消或下载失败。")
 
     # ── 扫描与表格渲染 ────────────────────────────────────
     def _on_scan_completed(self, items: list[ScannedFile]) -> None:

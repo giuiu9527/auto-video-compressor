@@ -10,7 +10,7 @@ from typing import Optional
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".flv", ".ts", ".m4v", ".webm"}
 OUTPUT_DIR_NAME = "YS"
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 
 
 def app_root_dir() -> Path:

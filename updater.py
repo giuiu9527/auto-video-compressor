@@ -2,6 +2,7 @@
 """软件自动检测与在线更新模块（对接 GitHub Release API），支持下载进度条。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -89,9 +90,10 @@ class UpdateDownloadWorker(QThread):
     progress_signal = Signal(int, str)       # (百分比 0-100, 状态描述)
     finished_signal = Signal(bool, str)      # (是否成功, 下载路径或错误信息)
 
-    def __init__(self, zip_url: str) -> None:
+    def __init__(self, zip_url: str, sha_url: str = "") -> None:
         super().__init__()
         self.zip_url = zip_url
+        self.sha_url = sha_url  # 非空时下载后校验 SHA-256（更新方式 2 使用）
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -134,6 +136,14 @@ class UpdateDownloadWorker(QThread):
                             size_mb = downloaded / (1024 * 1024)
                             self.progress_signal.emit(-1, f"正在下载: {size_mb:.1f} MB")
 
+            if self.sha_url:
+                self.progress_signal.emit(99, "正在校验文件完整性…")
+                err = self._verify_sha256(download_path)
+                if err:
+                    download_path.unlink(missing_ok=True)
+                    self.finished_signal.emit(False, err)
+                    return
+
             self.progress_signal.emit(100, "下载完成，准备安装更新…")
             self.finished_signal.emit(True, str(download_path))
 
@@ -141,10 +151,27 @@ class UpdateDownloadWorker(QThread):
             self.finished_signal.emit(False, str(exc))
 
 
+    def _verify_sha256(self, path: Path) -> str:
+        """返回错误信息；校验通过返回空串。"""
+        try:
+            req = urllib.request.Request(self.sha_url, headers={"User-Agent": "AutoVideoCompressor-Updater"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                expected = resp.read().decode("ascii", errors="replace").strip().split()[0].lower()
+        except Exception as exc:
+            return f"无法获取校验文件: {exc}"
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        if h.hexdigest().lower() != expected:
+            return "校验失败：下载文件与服务器 SHA-256 不一致，已拒绝安装"
+        return ""
+
+
 class UpdateProgressDialog(QDialog):
     """带进度条的下载更新对话框。"""
 
-    def __init__(self, zip_url: str, new_ver: str, parent=None) -> None:
+    def __init__(self, zip_url: str, new_ver: str, parent=None, sha_url: str = "") -> None:
         super().__init__(parent)
         self.setWindowTitle(f"正在更新到 {new_ver}")
         self.setFixedSize(460, 140)
@@ -173,7 +200,7 @@ class UpdateProgressDialog(QDialog):
         layout.addLayout(btn_row)
 
         # 启动后台下载
-        self.download_worker = UpdateDownloadWorker(zip_url)
+        self.download_worker = UpdateDownloadWorker(zip_url, sha_url)
         self.download_worker.progress_signal.connect(self._on_progress)
         self.download_worker.finished_signal.connect(self._on_finished)
         self.download_worker.start()
