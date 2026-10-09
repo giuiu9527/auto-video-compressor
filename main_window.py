@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 from compressor import VideoCompressor
 from config import (
     APP_DIR, APP_ICON_PATH, APP_VERSION, OUTPUT_DIR_NAME, SETTINGS_FILE, VIDEO_EXTS,
-    CompressionConfig, WatchConfig,
+    CompressionConfig, WatchConfig, is_under_dir, resolve_output_dir,
 )
 from scanner import FileStatus, FolderWatcherWorker, ScannedFile
 from params_form import CompressionParamsForm
@@ -37,6 +37,7 @@ from utils import format_time, now_str
 # 手动压缩列表项状态（存于 Qt.UserRole + 1）
 ST_WAITING, ST_QUEUED, ST_DONE, ST_FAILED, ST_SKIPPED = "waiting", "queued", "done", "failed", "skipped"
 ROLE_STATE = Qt.UserRole + 1
+ROLE_ROOT = Qt.UserRole + 2  # 手动条目的相对路径基准目录（自定义保存目录时保留其下的父文件夹结构）
 FOLLOW_MAIN = "__main__"  # 手动压缩“跟随主界面参数”
 
 
@@ -279,11 +280,26 @@ class MainWindow(QMainWindow):
         self.add_form_row(g3, 0, 0, "输出前缀", self.edit_prefix)
         self.add_form_row(g3, 0, 2, "并发数", self.spin_workers)
 
-        self.chk_force_compress = QCheckBox("强制压缩（忽略已有 YS 产物）")
-        self.chk_force_compress.setToolTip("开启后，即使 YS 文件夹中已有同名 MP4，也会再次压缩并生成带数字后缀的新文件")
+        self.edit_output_root = QLineEdit()
+        self.edit_output_root.setPlaceholderText("留空 = 源视频同级的 YS 文件夹")
+        self.edit_output_root.setToolTip(
+            "选择文件夹后，产物会保留源视频的父文件夹结构，例如 01/1.mkv -> 所选文件夹/01/1.mp4")
+        self.btn_browse_output = QPushButton("📁 选择")
+        self.btn_reset_output = QPushButton("↺ 原目录")
+        self.btn_reset_output.setToolTip("恢复为保存到源视频同级的 YS 文件夹")
+        self.btn_browse_output.clicked.connect(self._choose_output_root)
+        self.btn_reset_output.clicked.connect(self.edit_output_root.clear)
+        out_row = QHBoxLayout()
+        out_row.addWidget(self.edit_output_root, 1)
+        out_row.addWidget(self.btn_browse_output); out_row.addWidget(self.btn_reset_output)
+        g3.addWidget(QLabel("保存目录"), 2, 0)
+        g3.addLayout(out_row, 2, 1, 1, 3)
+
+        self.chk_force_compress = QCheckBox("强制压缩（忽略已有压缩产物）")
+        self.chk_force_compress.setToolTip("开启后，即使输出目录中已有同名 MP4，也会再次压缩并生成带数字后缀的新文件")
         self.chk_force_compress.setStyleSheet("QCheckBox{font-weight:600; color:#c0392b;}")
         self.chk_force_compress.toggled.connect(self._on_force_compress_toggled)
-        g3.addWidget(self.chk_force_compress, 2, 0, 1, 4)
+        g3.addWidget(self.chk_force_compress, 3, 0, 1, 4)
 
         self.combo_template = QComboBox()
         self.combo_template.setToolTip("选择模板后立即套用到左侧参数")
@@ -297,9 +313,10 @@ class MainWindow(QMainWindow):
         tpl_row.addWidget(self.btn_save_template); tpl_row.addWidget(self.btn_manage_templates)
         g3.addLayout(tpl_row, 1, 2, 1, 2)
 
-        hint = QLabel("产物统一保存到源视频同级的 YS 文件夹；排重只比较源文件名与 MP4 文件名，忽略输出前缀。")
+        hint = QLabel("保存目录留空时产物保存到源视频同级的 YS 文件夹；选择文件夹后保留父文件夹结构"
+                      "（如 01/1.mkv -> 所选文件夹/01/1.mp4）。排重只比较源文件名与 MP4 文件名，忽略输出前缀。")
         hint.setObjectName("HintLabel"); hint.setWordWrap(True)
-        g3.addWidget(hint, 3, 0, 1, 4)
+        g3.addWidget(hint, 4, 0, 1, 4)
         layout.addWidget(grp_out, 1)
 
         self.tabs.addTab(tab, "视频压缩参数")
@@ -309,7 +326,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8); layout.setSpacing(6)
         tab.files_dropped.connect(self._add_manual_paths)
 
-        hint = QLabel("将视频文件或文件夹拖到下方列表；文件夹会递归查找视频。点击“开始压缩”后，文件仍会输出到各自同级的 YS 文件夹。")
+        hint = QLabel("将视频文件或文件夹拖到下方列表；文件夹会递归查找视频。输出位置跟随“视频压缩参数”页的保存目录（自定义目录时保留拖入文件夹/文件所在文件夹的结构）。")
         hint.setObjectName("HintLabel"); hint.setWordWrap(True)
         layout.addWidget(hint)
 
@@ -422,6 +439,20 @@ class MainWindow(QMainWindow):
             self.edit_watch_dir.setText(d)
             self._on_scan_now_clicked()
 
+    def _choose_output_root(self) -> None:
+        start = self.edit_output_root.text().strip() or self.edit_watch_dir.text().strip() or str(APP_DIR)
+        d = QFileDialog.getExistingDirectory(self, "选择压缩产物保存目录", start)
+        if d:
+            self.edit_output_root.setText(d)
+
+    def _output_root(self) -> str:
+        return self.edit_output_root.text().strip()
+
+    def _watch_output_dir(self, path: Path) -> Path:
+        """自动监控任务的输出目录：以运行中扫描器的配置为准，保证与排重判定一致。"""
+        cfg = self.watcher_worker.watch_cfg if self.watcher_worker else self.collect_watch_config()
+        return resolve_output_dir(path, cfg.output_root, Path(cfg.watch_dir))
+
     def _open_watch_dir(self) -> None:
         path_str = self.edit_watch_dir.text().strip()
         if path_str:
@@ -434,15 +465,21 @@ class MainWindow(QMainWindow):
         except OSError:
             return str(path.absolute()).casefold()
 
-    @staticmethod
-    def _is_output_path(path: Path) -> bool:
-        return any(part.casefold() == OUTPUT_DIR_NAME.casefold() for part in path.parts[:-1])
+    def _is_output_path(self, path: Path) -> bool:
+        return (any(part.casefold() == OUTPUT_DIR_NAME.casefold() for part in path.parts[:-1])
+                or is_under_dir(path, self._output_root()))
 
-    def _has_manual_compressed_output(self, path: Path) -> bool:
-        """手动任务沿用自动监控的 YS 产物检测，防止重复压缩。"""
+    def _manual_output_dir(self, item: QListWidgetItem) -> Path:
+        path = Path(item.data(Qt.UserRole))
+        root = item.data(ROLE_ROOT)
+        return resolve_output_dir(path, self._output_root(), Path(root) if root else None)
+
+    def _has_manual_compressed_output(self, item: QListWidgetItem) -> bool:
+        """手动任务沿用自动监控的产物检测，防止重复压缩。"""
         if self.chk_force_compress.isChecked():
             return False
-        return FolderWatcherWorker._has_compressed_output(path)
+        return FolderWatcherWorker._has_compressed_output(
+            Path(item.data(Qt.UserRole)), self._manual_output_dir(item))
 
     def _on_force_compress_toggled(self, enabled: bool) -> None:
         """让运行中的扫描器立即采用强制压缩设置。"""
@@ -475,7 +512,11 @@ class MainWindow(QMainWindow):
         already_compressed = 0
         for path in paths:
             try:
-                candidates = path.rglob("*") if path.is_dir() else [path]
+                # 自定义保存目录时保留的结构基准：拖入文件夹保留该文件夹名，
+                # 拖入单个文件保留其所在文件夹名（01/1.mkv -> 保存目录/01/1.mp4）。
+                is_dir = path.is_dir()
+                root = path.parent if is_dir else path.parent.parent
+                candidates = path.rglob("*") if is_dir else [path]
                 for candidate in candidates:
                     if (not candidate.is_file() or candidate.suffix.lower() not in VIDEO_EXTS
                             or self._is_output_path(candidate)):
@@ -485,8 +526,9 @@ class MainWindow(QMainWindow):
                         continue
                     item = QListWidgetItem()
                     item.setData(Qt.UserRole, str(candidate))
-                    if self._has_manual_compressed_output(candidate):
-                        self._set_manual_item(item, ST_SKIPPED, "⏩ 已跳过 (已有 YS 产物)")
+                    item.setData(ROLE_ROOT, str(root))
+                    if self._has_manual_compressed_output(item):
+                        self._set_manual_item(item, ST_SKIPPED, "⏩ 已跳过 (已有压缩产物)")
                         already_compressed += 1
                     else:
                         self._set_manual_item(item, ST_WAITING, "等待处理")
@@ -498,9 +540,9 @@ class MainWindow(QMainWindow):
         if added:
             self.log(f"手动压缩列表已添加 {len(added)} 个视频。")
         if already_compressed:
-            self.log(f"其中 {already_compressed} 个视频已有 YS 压缩产物，已标记为跳过。")
+            self.log(f"其中 {already_compressed} 个视频已有压缩产物，已标记为跳过。")
         if not added and paths:
-            self.log("未添加视频：文件可能不受支持、已在列表中，或位于 YS 输出目录。")
+            self.log("未添加视频：文件可能不受支持、已在列表中，或位于输出目录。")
         if added and self.manual_compressor_worker and self.chk_manual_auto_submit.isChecked():
             self._submit_manual_items(added)
 
@@ -561,11 +603,11 @@ class MainWindow(QMainWindow):
             path = Path(item.data(Qt.UserRole))
             if not path.exists() or path.suffix.lower() not in VIDEO_EXTS:
                 continue
-            if self._has_manual_compressed_output(path):
-                self._set_manual_item(item, ST_SKIPPED, "⏩ 已跳过 (已有 YS 产物)")
+            if self._has_manual_compressed_output(item):
+                self._set_manual_item(item, ST_SKIPPED, "⏩ 已跳过 (已有压缩产物)")
                 skipped += 1
                 continue
-            worker.enqueue(path, cfg)
+            worker.enqueue(path, cfg, out_dir=self._manual_output_dir(item))
             self._set_manual_item(item, ST_QUEUED, "排队中")
             submitted += 1
         if submitted:
@@ -573,7 +615,7 @@ class MainWindow(QMainWindow):
             self.btn_manual_stop.setEnabled(True)
             self.set_status("手动压缩运行中", "busy")
         elif skipped:
-            self.log(f"手动压缩未提交任务：{skipped} 个视频已有 YS 压缩产物。")
+            self.log(f"手动压缩未提交任务：{skipped} 个视频已有压缩产物。")
         return submitted
 
     def _start_manual_compress(self) -> None:
@@ -687,6 +729,7 @@ class MainWindow(QMainWindow):
             auto_start_compress=self.chk_auto_start.isChecked(),
             force_compress=self.chk_force_compress.isChecked(),
             min_stable_sec=self.spin_min_stable.value(),
+            output_root=self._output_root(),
             excluded_paths=sorted(self.excluded_paths),
         )
 
@@ -705,6 +748,7 @@ class MainWindow(QMainWindow):
         self.spin_min_stable.setValue(getattr(w, "min_stable_sec", 180))
         self.chk_auto_start.setChecked(w.auto_start_compress)
         self.chk_force_compress.setChecked(getattr(w, "force_compress", False))
+        self.edit_output_root.setText(getattr(w, "output_root", ""))
         self.excluded_paths = {self._path_key(Path(p)) for p in getattr(w, "excluded_paths", [])}
 
         self.params_form.set_config(c)
@@ -861,7 +905,8 @@ class MainWindow(QMainWindow):
         if w_cfg.auto_start_compress and self.compressor_worker and waiting_count > 0:
             for item in items:
                 if item.status == FileStatus.WAITING:
-                    self.compressor_worker.enqueue(item.file_path)
+                    self.compressor_worker.enqueue(
+                        item.file_path, out_dir=self._watch_output_dir(item.file_path))
 
     def _show_table_context_menu(self, pos) -> None:
         selected_rows = set(item.row() for item in self.table.selectedItems())
@@ -928,7 +973,8 @@ class MainWindow(QMainWindow):
                 if self.watcher_worker:
                     self.watcher_worker.force_process(file_path)
                 if self.compressor_worker:
-                    self.compressor_worker.force_enqueue(file_path)
+                    self.compressor_worker.force_enqueue(
+                        file_path, out_dir=self._watch_output_dir(file_path))
 
         if self.watcher_worker:
             scanned = self.watcher_worker.scan_once()
@@ -1004,6 +1050,7 @@ class VideoCompressorWorker(QThread):
         self.active_set: set[str] = set()
         self.ever_enqueued: set[str] = set()  # 记录所有曾入队的文件，防止重复压缩
         self.task_cfgs: dict[str, CompressionConfig] = {}  # 任务专用参数（如手动模板）
+        self.task_out_dirs: dict[str, Path] = {}  # 任务输出目录；缺省为源视频同级 YS
         self._queue_lock = Lock()
         self._active_lock = Lock()
         self._has_received_work = False
@@ -1018,7 +1065,8 @@ class VideoCompressorWorker(QThread):
         with self._active_lock:
             return bool(self.active_set)
 
-    def enqueue(self, video_path: Path, cfg: Optional[CompressionConfig] = None) -> None:
+    def enqueue(self, video_path: Path, cfg: Optional[CompressionConfig] = None,
+                out_dir: Optional[Path] = None) -> None:
         """入队压缩（自动去重：同一文件在本轮监控中只会被压缩一次）。
         cfg 为该任务专用的压缩参数，缺省使用线程创建时的参数。"""
         path_str = str(video_path)
@@ -1027,16 +1075,20 @@ class VideoCompressorWorker(QThread):
                 self.ever_enqueued.add(path_str)
                 if cfg is not None:
                     self.task_cfgs[path_str] = cfg
+                if out_dir is not None:
+                    self.task_out_dirs[path_str] = out_dir
                 self.queue.append(video_path)
                 self._has_received_work = True
                 self._idle_reported = False
 
-    def force_enqueue(self, video_path: Path) -> None:
+    def force_enqueue(self, video_path: Path, out_dir: Optional[Path] = None) -> None:
         """强制入队（忽略去重历史，用于右键手动强制压缩）。"""
         path_str = str(video_path)
         with self._queue_lock, self._active_lock:
             if path_str not in self.active_set:
                 self.ever_enqueued.add(path_str)
+                if out_dir is not None:
+                    self.task_out_dirs[path_str] = out_dir
                 self.queue.append(video_path)
                 self._has_received_work = True
                 self._idle_reported = False
@@ -1048,6 +1100,7 @@ class VideoCompressorWorker(QThread):
             original_count = len(self.queue)
             self.queue = [p for p in self.queue if str(p) != path_str]
             self.task_cfgs.pop(path_str, None)
+            self.task_out_dirs.pop(path_str, None)
             if len(self.queue) < original_count:
                 self.ever_enqueued.discard(path_str)
                 return True
@@ -1063,6 +1116,7 @@ class VideoCompressorWorker(QThread):
         path_str = str(target)
         with self._queue_lock:
             cfg = self.task_cfgs.pop(path_str, None) or self.c_cfg
+            out_dir = self.task_out_dirs.pop(path_str, None)
         compressor = VideoCompressor(cfg, self.emit_log, lambda: self._stop_requested)
         # active_set.add 已在 run() 中 pool.submit 之前完成，此处无需重复添加
         self.file_progress_signal.emit(target, FileStatus.PROCESSING, 0)
@@ -1070,7 +1124,7 @@ class VideoCompressorWorker(QThread):
             def file_pct(pct: int):
                 self.file_progress_signal.emit(target, FileStatus.PROCESSING, pct)
 
-            compressor.compress(target, progress_cb=file_pct)
+            compressor.compress(target, out_dir=out_dir, progress_cb=file_pct)
             self.file_progress_signal.emit(target, FileStatus.COMPLETED, 100)
         except Exception as exc:
             self.emit_log(f"压缩任务失败 [{target.name}]: {exc}")

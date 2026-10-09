@@ -10,7 +10,7 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from config import OUTPUT_DIR_NAME, VIDEO_EXTS, WatchConfig
+from config import OUTPUT_DIR_NAME, VIDEO_EXTS, WatchConfig, is_under_dir, resolve_output_dir
 from utils import check_file_writing_status, probe_duration
 
 
@@ -99,9 +99,9 @@ class FolderWatcherWorker(QThread):
         return any(part.casefold() == OUTPUT_DIR_NAME.casefold() for part in parent_parts)
 
     @staticmethod
-    def _has_compressed_output(source: Path) -> bool:
-        """检查源文件同级的 YS 中是否已有同名 MP4，匹配时忽略输出前缀。"""
-        output_dir = source.parent / OUTPUT_DIR_NAME
+    def _has_compressed_output(source: Path, output_dir: Optional[Path] = None) -> bool:
+        """检查输出目录（默认源文件同级的 YS）中是否已有同名 MP4，匹配时忽略输出前缀。"""
+        output_dir = output_dir or source.parent / OUTPUT_DIR_NAME
         source_stem = source.stem.casefold()
         try:
             # 如果目录中同时有 video.mkv 和 myvideo.mkv，myvideo.mp4 应只归属于
@@ -160,7 +160,7 @@ class FolderWatcherWorker(QThread):
 
             # YS 是压缩产物专用目录。递归扫描时必须先整体排除，
             # 以免输出文件被再次识别为新的待压缩视频。
-            if self._is_in_output_dir(p, root_path):
+            if self._is_in_output_dir(p, root_path) or is_under_dir(p, cfg.output_root):
                 continue
 
             if self._path_key(p) in self.excluded_paths:
@@ -191,10 +191,11 @@ class FolderWatcherWorker(QThread):
                 ))
                 continue
 
-            # 1. 仅检查源视频同级 YS 目录中的同名 MP4；输出前缀不参与判定。
+            # 1. 仅检查输出目录（默认源视频同级 YS）中的同名 MP4；输出前缀不参与判定。
             # 单文件右键强制和全局强制压缩均可绕过该检查。
             if (not cfg.force_compress and path_str not in self.forced_paths
-                    and self._has_compressed_output(p)):
+                    and self._has_compressed_output(
+                        p, resolve_output_dir(p, cfg.output_root, root_path))):
                 st, pct = FileStatus.SKIPPED_ALREADY, 100
                 self.known_status_map[path_str] = (st, pct)
                 results.append(ScannedFile(p, rel_str, p.stat().st_size / (1024 * 1024), 0.0, st, pct))

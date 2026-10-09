@@ -10,7 +10,7 @@ from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import QApplication
 
-from config import WatchConfig
+from config import WatchConfig, resolve_output_dir
 from main_window import ManualDropList, MainWindow
 from scanner import FileStatus
 from scanner import FolderWatcherWorker
@@ -77,6 +77,45 @@ class CompressedOutputDetectionTests(unittest.TestCase):
         self.assertEqual(single_worker.scan_once()[0].status, FileStatus.WAITING)
 
 
+class OutputRootTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = TemporaryDirectory()
+        self.base = Path(self.temp_dir.name)
+        self.watch = self.base / "watch"
+        self.out = self.base / "A"
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def touch(self, path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        return path
+
+    def test_default_is_sibling_ys(self) -> None:
+        src = self.watch / "01" / "1.mkv"
+        self.assertEqual(resolve_output_dir(src, "", self.watch), src.parent / "YS")
+
+    def test_custom_root_keeps_parent_structure(self) -> None:
+        src = self.watch / "01" / "sub" / "1.mkv"
+        self.assertEqual(resolve_output_dir(src, str(self.out), self.watch), self.out / "01" / "sub")
+
+    def test_custom_root_without_base_keeps_direct_parent(self) -> None:
+        src = self.watch / "01" / "1.mkv"
+        self.assertEqual(resolve_output_dir(src, str(self.out)), self.out / "01")
+
+    @patch("scanner.probe_duration", return_value=10.0)
+    @patch("scanner.check_file_writing_status", return_value=(False, 0, ""))
+    def test_scanner_uses_custom_root_and_skips_it(self, _writing, _duration) -> None:
+        self.out = self.watch / "A"  # 输出目录位于监控目录内也不能被当作源视频
+        self.touch(self.watch / "01" / "1.mkv")
+        self.touch(self.watch / "02" / "2.mkv")
+        self.touch(self.out / "01" / "(ys)1.mp4")
+        worker = FolderWatcherWorker(WatchConfig(watch_dir=str(self.watch), output_root=str(self.out)))
+        status = {item.file_path.name: item.status for item in worker.scan_once()}
+        self.assertEqual(status, {"1.mkv": FileStatus.SKIPPED_ALREADY, "2.mkv": FileStatus.WAITING})
+
+
 class StartupAndDropTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -140,6 +179,26 @@ class StartupAndDropTests(unittest.TestCase):
             self.assertEqual(window.manual_list.count(), 1)
             self.assertEqual(Path(window.manual_list.item(0).data(Qt.UserRole)), source)
             self.assertNotIn("未添加视频", window.log_box.toPlainText())
+            window.close()
+
+    def test_manual_folder_output_keeps_folder_name(self) -> None:
+        with TemporaryDirectory() as temp_dir, \
+                patch("main_window.QTimer.singleShot"):
+            base = Path(temp_dir)
+            folder = base / "01"
+            folder.mkdir()
+            (folder / "1.mkv").touch()
+            single = base / "02" / "2.mkv"
+            single.parent.mkdir()
+            single.touch()
+            window = MainWindow()
+            window.edit_output_root.setText(str(base / "A"))
+            window._add_manual_paths([folder, single])
+
+            out_dirs = {Path(window.manual_list.item(i).data(Qt.UserRole)).name:
+                        window._manual_output_dir(window.manual_list.item(i))
+                        for i in range(window.manual_list.count())}
+            self.assertEqual(out_dirs, {"1.mkv": base / "A" / "01", "2.mkv": base / "A" / "02"})
             window.close()
 
     def test_startup_scan_runs_without_blocking_main_thread(self) -> None:

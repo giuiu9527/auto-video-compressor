@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".flv", ".ts", ".m4v", ".webm"}
 OUTPUT_DIR_NAME = "YS"
@@ -38,6 +39,37 @@ def get_app_icon_path() -> Path:
 
 APP_ICON_PATH = get_app_icon_path()
 SETTINGS_FILE = APP_DIR / "watch_compress_settings.json"
+
+
+def resolve_output_dir(src: Path, output_root: str = "", source_root: Optional[Path] = None) -> Path:
+    """计算压缩产物目录。
+
+    output_root 为空：源视频同级的 YS 文件夹。
+    output_root 非空：在该文件夹下保留源视频相对 source_root 的父目录结构，
+    例如 source_root/01/1.mkv -> output_root/01/；无法求相对路径时保留源视频的直接父文件夹名。
+    """
+    if not output_root:
+        return src.parent / OUTPUT_DIR_NAME
+    rel_parent: Optional[Path] = None
+    if source_root is not None:
+        try:
+            rel_parent = src.parent.relative_to(source_root)
+        except ValueError:
+            rel_parent = None
+    if rel_parent is None:
+        rel_parent = Path(src.parent.name)
+    return Path(output_root) / rel_parent
+
+
+def is_under_dir(path: Path, root: str) -> bool:
+    """path 是否位于 root 文件夹内（root 为空时恒为 False）。"""
+    if not root:
+        return False
+    try:
+        path.resolve().relative_to(Path(root).resolve())
+        return True
+    except (ValueError, OSError):
+        return False
 
 
 @dataclass
@@ -82,5 +114,7 @@ class WatchConfig:
     # 忽略 YS 中已有的同名 MP4，仍然提交压缩。
     force_compress: bool = False
     min_stable_sec: int = 180
+    # 自定义保存目录；为空时保存到源视频同级的 YS 文件夹。
+    output_root: str = ""
     # 用户从监控列表中手动排除的视频（绝对路径）。
     excluded_paths: list[str] = field(default_factory=list)
