@@ -116,5 +116,7 @@ class WatchConfig:
     min_stable_sec: int = 180
     # 自定义保存目录；为空时保存到源视频同级的 YS 文件夹。
     output_root: str = ""
+    # 手动压缩的保存目录，与自动监控互相独立；为空时保存到源视频同级的 YS 文件夹。
+    manual_output_root: str = ""
     # 用户从监控列表中手动排除的视频（绝对路径）。
     excluded_paths: list[str] = field(default_factory=list)

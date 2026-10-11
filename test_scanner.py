@@ -192,13 +192,29 @@ class StartupAndDropTests(unittest.TestCase):
             single.parent.mkdir()
             single.touch()
             window = MainWindow()
-            window.edit_output_root.setText(str(base / "A"))
+            window.edit_manual_output_root.setText(str(base / "A"))
             window._add_manual_paths([folder, single])
 
             out_dirs = {Path(window.manual_list.item(i).data(Qt.UserRole)).name:
                         window._manual_output_dir(window.manual_list.item(i))
                         for i in range(window.manual_list.count())}
             self.assertEqual(out_dirs, {"1.mkv": base / "A" / "01", "2.mkv": base / "A" / "02"})
+            window.close()
+
+    def test_manual_output_defaults_to_sibling_ys_independent_of_watch(self) -> None:
+        with TemporaryDirectory() as temp_dir, \
+                patch("main_window.QTimer.singleShot"):
+            base = Path(temp_dir)
+            source = base / "01" / "1.mkv"
+            source.parent.mkdir()
+            source.touch()
+            window = MainWindow()
+            window.edit_manual_output_root.clear()
+            window.edit_output_root.setText(str(base / "WatchOut"))
+            window._add_manual_paths([source])
+
+            self.assertEqual(window._manual_output_dir(window.manual_list.item(0)), source.parent / "YS")
+            self.assertEqual(window.collect_watch_config().manual_output_root, "")
             window.close()
 
     def test_startup_scan_runs_without_blocking_main_thread(self) -> None:

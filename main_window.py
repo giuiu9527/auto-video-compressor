@@ -340,9 +340,23 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8); layout.setSpacing(6)
         tab.files_dropped.connect(self._add_manual_paths)
 
-        hint = QLabel("将视频文件或文件夹拖到下方列表；文件夹会递归查找视频。输出位置跟随“视频压缩参数”页的保存目录（自定义目录时保留拖入文件夹/文件所在文件夹的结构）。")
+        hint = QLabel("将视频文件或文件夹拖到下方列表；文件夹会递归查找视频。保存目录留空时产物保存到源视频同级的 YS 文件夹；"
+                      "选择文件夹后保留拖入文件夹/文件所在文件夹的结构。此设置与自动监控的保存目录互相独立。")
         hint.setObjectName("HintLabel"); hint.setWordWrap(True)
         layout.addWidget(hint)
+
+        out_row = QHBoxLayout()
+        out_row.addWidget(QLabel("保存目录:"))
+        self.edit_manual_output_root = QLineEdit()
+        self.edit_manual_output_root.setPlaceholderText("留空 = 源视频同级的 YS 文件夹")
+        self.btn_manual_browse_output = QPushButton("📁 选择")
+        self.btn_manual_reset_output = QPushButton("↺ 同级 YS")
+        self.btn_manual_reset_output.setToolTip("恢复为保存到源视频同级的 YS 文件夹")
+        self.btn_manual_browse_output.clicked.connect(self._choose_manual_output_root)
+        self.btn_manual_reset_output.clicked.connect(self.edit_manual_output_root.clear)
+        out_row.addWidget(self.edit_manual_output_root, 1)
+        out_row.addWidget(self.btn_manual_browse_output); out_row.addWidget(self.btn_manual_reset_output)
+        layout.addLayout(out_row)
 
         opt = QHBoxLayout()
         opt.addWidget(QLabel("压缩模板:"))
@@ -462,6 +476,15 @@ class MainWindow(QMainWindow):
     def _output_root(self) -> str:
         return self.edit_output_root.text().strip()
 
+    def _choose_manual_output_root(self) -> None:
+        start = self.edit_manual_output_root.text().strip() or str(APP_DIR)
+        d = QFileDialog.getExistingDirectory(self, "选择手动压缩产物保存目录", start)
+        if d:
+            self.edit_manual_output_root.setText(d)
+
+    def _manual_output_root(self) -> str:
+        return self.edit_manual_output_root.text().strip()
+
     def _watch_output_dir(self, path: Path) -> Path:
         """自动监控任务的输出目录：以运行中扫描器的配置为准，保证与排重判定一致。"""
         cfg = self.watcher_worker.watch_cfg if self.watcher_worker else self.collect_watch_config()
@@ -481,12 +504,13 @@ class MainWindow(QMainWindow):
 
     def _is_output_path(self, path: Path) -> bool:
         return (any(part.casefold() == OUTPUT_DIR_NAME.casefold() for part in path.parts[:-1])
-                or is_under_dir(path, self._output_root()))
+                or is_under_dir(path, self._output_root())
+                or is_under_dir(path, self._manual_output_root()))
 
     def _manual_output_dir(self, item: QListWidgetItem) -> Path:
         path = Path(item.data(Qt.UserRole))
         root = item.data(ROLE_ROOT)
-        return resolve_output_dir(path, self._output_root(), Path(root) if root else None)
+        return resolve_output_dir(path, self._manual_output_root(), Path(root) if root else None)
 
     def _has_manual_compressed_output(self, item: QListWidgetItem) -> bool:
         """手动任务沿用自动监控的产物检测，防止重复压缩。"""
@@ -745,6 +769,7 @@ class MainWindow(QMainWindow):
             force_compress=self.chk_force_compress.isChecked(),
             min_stable_sec=self.spin_min_stable.value(),
             output_root=self._output_root(),
+            manual_output_root=self._manual_output_root(),
             excluded_paths=sorted(self.excluded_paths),
         )
 
@@ -764,6 +789,7 @@ class MainWindow(QMainWindow):
         self.chk_auto_start.setChecked(w.auto_start_compress)
         self.chk_force_compress.setChecked(getattr(w, "force_compress", False))
         self.edit_output_root.setText(getattr(w, "output_root", ""))
+        self.edit_manual_output_root.setText(getattr(w, "manual_output_root", ""))
         self.excluded_paths = {self._path_key(Path(p)) for p in getattr(w, "excluded_paths", [])}
 
         self.params_form.set_config(c)
