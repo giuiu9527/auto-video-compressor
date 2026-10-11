@@ -704,6 +704,7 @@ class MainWindow(QMainWindow):
         worker = FolderWatcherWorker(w_cfg)
         if self.watcher_worker:
             worker.known_status_map = dict(self.watcher_worker.known_status_map)
+            worker.forced_paths = set(self.watcher_worker.forced_paths)
         worker.scan_completed_signal.connect(self._on_scan_completed)
         worker.log_signal.connect(self.log)
         worker.finished.connect(lambda: self._on_one_shot_scan_finished(worker))
@@ -1006,8 +1007,7 @@ class MainWindow(QMainWindow):
             return
         self.save_settings(silent=True)
         self.log(f"🚫 已排除 {excluded} 个视频；后续扫描将不再显示或压缩它们。")
-        worker = self.watcher_worker or FolderWatcherWorker(self.collect_watch_config())
-        self._on_scan_completed(worker.scan_once())
+        self._start_one_shot_scan(self.collect_watch_config())
 
     def _force_compress_selected_rows(self, selected_rows: set[int]) -> None:
         watch_dir = Path(self.edit_watch_dir.text().strip())
@@ -1033,8 +1033,7 @@ class MainWindow(QMainWindow):
                         file_path, out_dir=self._watch_output_dir(file_path))
 
         if self.watcher_worker:
-            scanned = self.watcher_worker.scan_once()
-            self._on_scan_completed(scanned)
+            self._start_one_shot_scan(self.collect_watch_config())
 
     def _open_selected_rows_folder(self, selected_rows: set[int]) -> None:
         watch_dir = Path(self.edit_watch_dir.text().strip())
@@ -1085,12 +1084,41 @@ class MainWindow(QMainWindow):
         self.set_status("就绪 (监控已停止)", "ok")
         self.log("■ 监控与压缩引擎已停止。")
 
+    _PROGRESS_STATUS_COLORS = {
+        FileStatus.PROCESSING: "#1f6fb2",
+        FileStatus.COMPLETED: "#2ecc71",
+        FileStatus.FAILED: "#e74c3c",
+    }
+
     def _on_file_progress_update(self, src_path: Path, status_str: str, progress: int) -> None:
         if self.watcher_worker:
             self.watcher_worker.update_file_status(src_path, status_str, progress)
-            # 刷新表格展示
-            scanned = self.watcher_worker.scan_once()
-            self._on_scan_completed(scanned)
+        # 进度信号很频繁：只原地刷新对应行，不在界面线程重新扫盘（目录遍历 + ffprobe 会卡死界面）。
+        # 汇总数字与新文件由后台定时扫描刷新。
+        row = self._find_watch_row(src_path)
+        if row < 0:
+            return
+        it_status = self.table.item(row, 4)
+        if it_status and it_status.text() != status_str:
+            it_status.setText(status_str)
+            color = self._PROGRESS_STATUS_COLORS.get(status_str)
+            if color:
+                it_status.setForeground(QColor(color))
+        pbar = self.table.cellWidget(row, 5)
+        if isinstance(pbar, QProgressBar) and pbar.value() != progress:
+            pbar.setValue(progress)
+
+    def _find_watch_row(self, src_path: Path) -> int:
+        """按相对路径在监控表格中定位文件所在行，找不到返回 -1。"""
+        try:
+            target = str(src_path.relative_to(Path(self.edit_watch_dir.text().strip()))).casefold()
+        except ValueError:
+            target = src_path.name.casefold()
+        for r in range(self.table.rowCount()):
+            item = self.table.item(r, 1)
+            if item and item.text().casefold() == target:
+                return r
+        return -1
 
 
 # ── 后台压缩队列处理线程 ──────────────────────────────────
