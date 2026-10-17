@@ -137,6 +137,19 @@ def probe_duration(video: Path) -> float:
         return 0.0
 
 
+# 文件路径 -> ((大小, 修改时间), 本机首次观察到该状态的时间)
+_first_seen_stable: dict[str, tuple[tuple[int, int], float]] = {}
+
+
+def restart_stable_wait(video_path: Path) -> None:
+    """从现在起重新计时冷却（用于发现源文件未同步完整后的重试）。"""
+    try:
+        st = video_path.stat()
+        _first_seen_stable[str(video_path)] = ((st.st_size, st.st_mtime_ns), time.time())
+    except OSError:
+        _first_seen_stable.pop(str(video_path), None)
+
+
 def check_file_writing_status(video_path: Path, min_stable_sec: int = 30) -> tuple[bool, int, str]:
     """
     4重防御机制检测 Syncthing 实时同步及边录边传未完成的视频：
@@ -171,10 +184,18 @@ def check_file_writing_status(video_path: Path, min_stable_sec: int = 30) -> tup
     except OSError:
         return True, 0, "文件系统锁定"
 
-    # 3. 文件修改时间 (st_mtime) 冷却判定
+    # 3. 冷却判定：修改时间要足够旧，且本机亲眼观察到 (大小, 修改时间) 持续不变 min_stable_sec。
+    # 云盘同步会保留录制电脑上的原始修改时间，且元数据可能先于内容到达，只看 st_mtime 会过早放行。
     try:
-        mtime = video_path.stat().st_mtime
-        elapsed = time.time() - mtime
+        st = video_path.stat()
+        now = time.time()
+        sig = (st.st_size, st.st_mtime_ns)
+        key = str(video_path)
+        seen = _first_seen_stable.get(key)
+        if seen is None or seen[0] != sig:
+            seen = (sig, now)
+            _first_seen_stable[key] = seen
+        elapsed = min(now - st.st_mtime, now - seen[1])
         if elapsed < min_stable_sec:
             remaining = int(min_stable_sec - elapsed) + 1
             return True, remaining, f"静止冷却中 (还需 {remaining}s)"

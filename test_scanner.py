@@ -248,5 +248,90 @@ class StartupAndDropTests(unittest.TestCase):
                 self.assertEqual(utils._bundled_bin_dir(), internal_bin)
 
 
+class CloudSyncSafetyTests(unittest.TestCase):
+    """云盘同步会保留原始修改时间、元数据可能先于内容到达，必须防止压到不完整的视频。"""
+
+    def setUp(self) -> None:
+        self.temp_dir = TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        utils._first_seen_stable.clear()
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def make_old_file(self, name: str) -> Path:
+        path = self.root / name
+        path.write_bytes(b"x" * 1024)
+        old = time.time() - 3600
+        import os
+        os.utime(path, (old, old))
+        return path
+
+    @patch("utils.run_cmd")
+    def test_old_mtime_alone_does_not_pass_cooldown(self, run_cmd) -> None:
+        run_cmd.return_value.returncode = 0
+        run_cmd.return_value.stdout = "h264"
+        path = self.make_old_file("a.mkv")
+        now = time.time()
+        with patch("utils.time.time", return_value=now):
+            locked, remaining, _ = utils.check_file_writing_status(path, 180)
+        self.assertTrue(locked)
+        self.assertGreater(remaining, 170)
+        with patch("utils.time.time", return_value=now + 181):
+            self.assertFalse(utils.check_file_writing_status(path, 180)[0])
+
+    @patch("utils.run_cmd")
+    def test_change_in_size_restarts_cooldown(self, run_cmd) -> None:
+        run_cmd.return_value.returncode = 0
+        run_cmd.return_value.stdout = "h264"
+        path = self.make_old_file("b.mkv")
+        now = time.time()
+        with patch("utils.time.time", return_value=now):
+            utils.check_file_writing_status(path, 180)
+        with open(path, "ab") as f:
+            f.write(b"more")
+        import os
+        old = time.time() - 3600
+        os.utime(path, (old, old))
+        with patch("utils.time.time", return_value=now + 181):
+            self.assertTrue(utils.check_file_writing_status(path, 180)[0])
+
+    def test_short_output_is_deleted_and_marked_not_ready(self) -> None:
+        from compressor import SourceNotReadyError, VideoCompressor
+        from config import CompressionConfig
+        src = self.make_old_file("src.mkv")
+        dst = self.root / "out.mp4"
+        dst.write_bytes(b"y")
+        comp = VideoCompressor(CompressionConfig(), lambda _msg: None, lambda: False)
+        durations = {str(src): 21.3, str(dst): 3.0}
+        with patch("compressor.probe_duration", side_effect=lambda p: durations[str(p)]):
+            with self.assertRaises(SourceNotReadyError):
+                comp._verify_result(src, dst, src.stat(), 21.3, 12.3)
+        self.assertFalse(dst.exists())
+
+    def test_source_duration_change_after_encode_is_detected(self) -> None:
+        from compressor import SourceNotReadyError, VideoCompressor
+        from config import CompressionConfig
+        src = self.make_old_file("src.mkv")
+        dst = self.root / "out.mp4"
+        dst.write_bytes(b"y")
+        comp = VideoCompressor(CompressionConfig(), lambda _msg: None, lambda: False)
+        with patch("compressor.probe_duration", side_effect=lambda p: 6633.3 if p == src else 12.3):
+            with self.assertRaises(SourceNotReadyError):
+                comp._verify_result(src, dst, src.stat(), 21.3, 12.3)
+        self.assertFalse(dst.exists())
+
+    def test_complete_output_passes(self) -> None:
+        from compressor import VideoCompressor
+        from config import CompressionConfig
+        src = self.make_old_file("src.mkv")
+        dst = self.root / "out.mp4"
+        dst.write_bytes(b"y")
+        comp = VideoCompressor(CompressionConfig(), lambda _msg: None, lambda: False)
+        with patch("compressor.probe_duration", side_effect=lambda p: 6633.3 if p == src else 6624.2):
+            comp._verify_result(src, dst, src.stat(), 6633.3, 6624.3)
+        self.assertTrue(dst.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

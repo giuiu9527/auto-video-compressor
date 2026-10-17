@@ -37,6 +37,13 @@ RATE_MODE_OPTIONS: dict[str, str] = {
 OUTPUT_FORMAT_OPTIONS = ["mp4", "mkv", "mov"]
 PRESET_OPTIONS = ["p1", "p2", "p3", "p4", "p5", "p6", "p7", "fast", "medium", "slow"]
 
+# 源视频平均码率超过此值时，认为“读到的时长”与“文件大小”对不上（云盘内容未同步完整）。
+MAX_PLAUSIBLE_SOURCE_MBPS = 100
+
+
+class SourceNotReadyError(RuntimeError):
+    """源视频内容尚未同步完整或压缩期间发生变化；产物已删除，稍后应重试。"""
+
 
 class VideoCompressor:
     def __init__(
@@ -259,6 +266,34 @@ class VideoCompressor:
                 proc.terminate()
         return ret, tail
 
+    def _verify_result(self, src: Path, dst: Path, src_stat, src_duration: float,
+                       encode_duration: float) -> None:
+        """压缩完成后复查：源文件在压缩期间是否变化、产物时长是否完整；不合格则删除产物。"""
+        problem = ""
+        try:
+            now_stat = src.stat()
+        except OSError:
+            now_stat = None
+        if (now_stat is None or now_stat.st_size != src_stat.st_size
+                or now_stat.st_mtime_ns != src_stat.st_mtime_ns):
+            problem = "压缩期间源文件发生变化（仍在同步/写入）"
+        else:
+            now_duration = probe_duration(src)
+            if now_duration > 0 and abs(now_duration - src_duration) > 2:
+                problem = (f"源文件时长由 {format_time(src_duration)} 变为 "
+                           f"{format_time(now_duration)}（云盘内容刚同步完成）")
+            elif encode_duration > 0:
+                out_duration = probe_duration(dst)
+                if out_duration < encode_duration - max(5.0, encode_duration * 0.02):
+                    problem = (f"产物时长 {format_time(out_duration)} 明显短于预期 "
+                               f"{format_time(encode_duration)}（读取源文件中断）")
+        if problem:
+            try:
+                dst.unlink()
+            except OSError:
+                pass
+            raise SourceNotReadyError(f"{problem}，已删除不完整产物 {dst.name}")
+
     def compress(
         self,
         src: Path,
@@ -276,7 +311,12 @@ class VideoCompressor:
                                  cfg.extra_left, cfg.extra_right)):
             crop_filter = self.detect_crop(src)
 
+        src_stat = src.stat()
         duration = probe_duration(src)
+        if duration > 0 and src_stat.st_size * 8 / duration / 1e6 > MAX_PLAUSIBLE_SOURCE_MBPS:
+            raise SourceNotReadyError(
+                f"读到的时长 {format_time(duration)} 与文件大小 {src_stat.st_size / 1048576:.0f}MB 不符，"
+                f"疑似云盘内容尚未同步完整")
         target_duration = None
         if cfg.trim_end and cfg.trim_end_sec > 0:
             if duration > cfg.trim_end_sec:
@@ -311,6 +351,7 @@ class VideoCompressor:
         if ret != 0 or not dst.exists():
             detail = "\n".join(tail)
             raise RuntimeError(f"压缩失败: {src.name} (返回码 {ret})\n{detail}")
+        self._verify_result(src, dst, src_stat, duration, encode_duration)
         if progress_cb:
             progress_cb(100)
         if status_cb:

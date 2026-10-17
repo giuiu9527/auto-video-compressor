@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem,
 )
 
-from compressor import VideoCompressor
+from compressor import SourceNotReadyError, VideoCompressor
 from config import (
     APP_DIR, APP_ICON_PATH, APP_VERSION, OUTPUT_DIR_NAME, SETTINGS_FILE, VIDEO_EXTS,
     CompressionConfig, WatchConfig, is_under_dir, resolve_output_dir,
@@ -36,10 +36,12 @@ from config import (
 from scanner import FileStatus, FolderWatcherWorker, ScannedFile
 from params_form import CompressionParamsForm
 from templates import TemplateManagerDialog, TemplateStore, ask_template_name
-from utils import format_time, now_str
+from utils import format_time, now_str, restart_stable_wait
 
 # 手动压缩列表项状态（存于 Qt.UserRole + 1）
 ST_WAITING, ST_QUEUED, ST_DONE, ST_FAILED, ST_SKIPPED = "waiting", "queued", "done", "failed", "skipped"
+# 源文件未同步完整时，最多自动重试的次数
+MAX_NOT_READY_RETRIES = 3
 ROLE_STATE = Qt.UserRole + 1
 ROLE_ROOT = Qt.UserRole + 2  # 手动条目的相对路径基准目录（自定义保存目录时保留其下的父文件夹结构）
 FOLLOW_MAIN = "__main__"  # 手动压缩“跟随主界面参数”
@@ -697,6 +699,9 @@ class MainWindow(QMainWindow):
                     self._set_manual_item(item, ST_DONE, "✅ 已完成")
                 elif status_str == FileStatus.FAILED:
                     self._set_manual_item(item, ST_FAILED, "❌ 压缩失败")
+                elif status_str == FileStatus.RETRY_LATER:
+                    # 手动列表不会自动重扫：恢复为待处理，同步完成后再点开始即可
+                    self._set_manual_item(item, ST_WAITING, "⏳ 源文件未同步完整，稍后重新开始")
                 else:
                     self._set_manual_item(item, ST_QUEUED, f"压缩中 {progress}%")
                 break
@@ -1114,11 +1119,16 @@ class MainWindow(QMainWindow):
         FileStatus.PROCESSING: "#1f6fb2",
         FileStatus.COMPLETED: "#2ecc71",
         FileStatus.FAILED: "#e74c3c",
+        FileStatus.RETRY_LATER: "#e67e22",
     }
 
     def _on_file_progress_update(self, src_path: Path, status_str: str, progress: int) -> None:
         if self.watcher_worker:
-            self.watcher_worker.update_file_status(src_path, status_str, progress)
+            if status_str == FileStatus.RETRY_LATER:
+                # 忘掉该文件的状态，让后续扫描重新走冷却/完整性检查后再入队
+                self.watcher_worker.known_status_map.pop(str(src_path), None)
+            else:
+                self.watcher_worker.update_file_status(src_path, status_str, progress)
         # 进度信号很频繁：只原地刷新对应行，不在界面线程重新扫盘（目录遍历 + ffprobe 会卡死界面）。
         # 汇总数字与新文件由后台定时扫描刷新。
         row = self._find_watch_row(src_path)
@@ -1161,6 +1171,7 @@ class VideoCompressorWorker(QThread):
         self.ever_enqueued: set[str] = set()  # 记录所有曾入队的文件，防止重复压缩
         self.task_cfgs: dict[str, CompressionConfig] = {}  # 任务专用参数（如手动模板）
         self.task_out_dirs: dict[str, Path] = {}  # 任务输出目录；缺省为源视频同级 YS
+        self.not_ready_retries: dict[str, int] = {}  # 源文件未同步完整导致的重试次数
         self._queue_lock = Lock()
         self._active_lock = Lock()
         self._has_received_work = False
@@ -1236,6 +1247,22 @@ class VideoCompressorWorker(QThread):
 
             compressor.compress(target, out_dir=out_dir, progress_cb=file_pct)
             self.file_progress_signal.emit(target, FileStatus.COMPLETED, 100)
+        except SourceNotReadyError as exc:
+            retries = self.not_ready_retries.get(path_str, 0) + 1
+            self.not_ready_retries[path_str] = retries
+            if retries > MAX_NOT_READY_RETRIES:
+                self.emit_log(f"压缩任务失败 [{target.name}]: {exc}（已重试 {MAX_NOT_READY_RETRIES} 次，放弃）")
+                self.file_progress_signal.emit(target, FileStatus.FAILED, 0)
+            else:
+                self.emit_log(f"⚠ [{target.name}] {exc}；等待同步稳定后自动重试 ({retries}/{MAX_NOT_READY_RETRIES})")
+                with self._queue_lock:
+                    self.ever_enqueued.discard(path_str)  # 允许后续扫描再次入队
+                    if cfg is not self.c_cfg:
+                        self.task_cfgs[path_str] = cfg
+                    if out_dir is not None:
+                        self.task_out_dirs[path_str] = out_dir
+                restart_stable_wait(target)  # 从现在起重新等满冷却时间
+                self.file_progress_signal.emit(target, FileStatus.RETRY_LATER, 0)
         except Exception as exc:
             self.emit_log(f"压缩任务失败 [{target.name}]: {exc}")
             self.file_progress_signal.emit(target, FileStatus.FAILED, 0)

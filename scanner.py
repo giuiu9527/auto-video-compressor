@@ -21,6 +21,7 @@ class FileStatus:
     SKIPPED_ALREADY = "⏩ 已跳过 (YS 已有同名 MP4)"
     SKIPPED_WRITING = "⏳ 暂跳过 (正在录制/写入)"
     FAILED = "❌ 压缩失败"
+    RETRY_LATER = "⏳ 源文件未同步完整，稍后重试"
 
 
 @dataclass
