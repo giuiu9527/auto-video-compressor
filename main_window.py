@@ -504,10 +504,17 @@ class MainWindow(QMainWindow):
         except OSError:
             return str(path.absolute()).casefold()
 
-    def _is_output_path(self, path: Path) -> bool:
-        return (any(part.casefold() == OUTPUT_DIR_NAME.casefold() for part in path.parts[:-1])
-                or is_under_dir(path, self._output_root())
-                or is_under_dir(path, self._manual_output_root()))
+    def _is_output_path(self, path: Path, base: Path) -> bool:
+        """拖入文件夹 base 时，是否应跳过其中的压缩产物。
+        只排除 base 之下的输出目录；用户主动拖入的输出目录本身（或其中的文件）照常添加。"""
+        try:
+            inner_parts = path.relative_to(base).parts[:-1]
+        except ValueError:
+            inner_parts = ()
+        if any(part.casefold() == OUTPUT_DIR_NAME.casefold() for part in inner_parts):
+            return True
+        return any(is_under_dir(path, root) and not is_under_dir(base, root)
+                   for root in (self._output_root(), self._manual_output_root()))
 
     def _manual_output_dir(self, item: QListWidgetItem) -> Path:
         path = Path(item.data(Qt.UserRole))
@@ -559,7 +566,7 @@ class MainWindow(QMainWindow):
                 candidates = path.rglob("*") if is_dir else [path]
                 for candidate in candidates:
                     if (not candidate.is_file() or candidate.suffix.lower() not in VIDEO_EXTS
-                            or self._is_output_path(candidate)):
+                            or (is_dir and self._is_output_path(candidate, path))):
                         continue
                     key = self._path_key(candidate)
                     if key in existing:
@@ -582,7 +589,7 @@ class MainWindow(QMainWindow):
         if already_compressed:
             self.log(f"其中 {already_compressed} 个视频已有压缩产物，已标记为跳过。")
         if not added and paths:
-            self.log("未添加视频：文件可能不受支持、已在列表中，或位于输出目录。")
+            self.log("未添加视频：文件格式不受支持、已在列表中，或是所拖文件夹内 YS/保存目录中的压缩产物。")
         if added and self.manual_compressor_worker and self.chk_manual_auto_submit.isChecked():
             self._submit_manual_items(added)
 

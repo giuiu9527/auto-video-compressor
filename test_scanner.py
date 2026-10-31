@@ -201,6 +201,32 @@ class StartupAndDropTests(unittest.TestCase):
             self.assertEqual(out_dirs, {"1.mkv": base / "A" / "01", "2.mkv": base / "A" / "02"})
             window.close()
 
+    def test_manual_accepts_videos_from_watch_output_folder(self) -> None:
+        with TemporaryDirectory() as temp_dir, \
+                patch("main_window.QTimer.singleShot"):
+            base = Path(temp_dir)
+            out_root = base / "压缩视频"
+            folder = out_root / "07"
+            (folder / "YS").mkdir(parents=True)
+            (folder / "1.mp4").touch()
+            (folder / "YS" / "1.mp4").touch()  # 拖入文件夹内的 YS 产物仍要排除
+            window = MainWindow()
+            window.edit_manual_output_root.clear()
+            window.edit_output_root.setText(str(out_root))
+            window._add_manual_paths([folder])
+
+            names = [Path(window.manual_list.item(i).data(Qt.UserRole)) for i in range(window.manual_list.count())]
+            self.assertEqual(names, [folder / "1.mp4"])
+
+            window._clear_manual_list()
+            window._add_manual_paths([folder / "YS" / "1.mp4"])  # 直接拖入单个文件总是接受
+            self.assertEqual(window.manual_list.count(), 1)
+
+            window._clear_manual_list()
+            window._add_manual_paths([base])  # 拖入上层文件夹时，其中的自动监控保存目录被排除
+            self.assertEqual(window.manual_list.count(), 0)
+            window.close()
+
     def test_manual_output_defaults_to_sibling_ys_independent_of_watch(self) -> None:
         with TemporaryDirectory() as temp_dir, \
                 patch("main_window.QTimer.singleShot"):
