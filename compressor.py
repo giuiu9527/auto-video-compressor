@@ -11,7 +11,8 @@ from typing import Callable, Optional
 from config import CompressionConfig, OUTPUT_DIR_NAME
 from utils import (
     CREATE_NO_WINDOW, ffmpeg_input_prefix, format_time,
-    probe_bitrate_kbps, probe_dimensions, probe_duration, run_cmd, unique_path,
+    probe_bitrate_kbps, probe_color_space, probe_dimensions, probe_duration,
+    run_cmd, unique_path,
 )
 
 VIDEO_CODEC_OPTIONS: dict[str, str] = {
@@ -36,6 +37,22 @@ RATE_MODE_OPTIONS: dict[str, str] = {
 
 OUTPUT_FORMAT_OPTIONS = ["mp4", "mkv", "mov"]
 PRESET_OPTIONS = ["p1", "p2", "p3", "p4", "p5", "p6", "p7", "fast", "medium", "slow"]
+
+# NVENC 预设 p1(最快)~p7(最慢) 对应的 x264/x265 预设；CPU 编码器不认 p1~p7。
+_CPU_PRESET_FOR_NVENC = {
+    "p1": "veryfast", "p2": "faster", "p3": "fast", "p4": "medium",
+    "p5": "slow", "p6": "slower", "p7": "veryslow",
+}
+
+# FFmpeg 像素格式转换能处理的色彩矩阵；手机投屏(scrcpy)录像常被标成 ycgco，转换时会直接报错。
+_SWSCALE_COLOR_SPACES = {
+    "bt709", "bt470bg", "smpte170m", "smpte240m", "bt2020nc", "fcc", "gbr",
+}
+
+
+def cpu_preset(preset: str) -> str:
+    return _CPU_PRESET_FOR_NVENC.get(preset, preset)
+
 
 # 源视频平均码率超过此值时，认为“读到的时长”与“文件大小”对不上（云盘内容未同步完整）。
 MAX_PLAUSIBLE_SOURCE_MBPS = 100
@@ -175,8 +192,15 @@ class VideoCompressor:
             cmd += ["-c:v", "copy"]
         else:
             cmd += ["-c:v", v_codec]
+            filters = []
+            color_space = probe_color_space(src)
+            if color_space and color_space not in _SWSCALE_COLOR_SPACES:
+                # 只改标记不动像素：让后续像素格式转换能进行（否则硬解、软解都会失败）。
+                filters.append("setparams=colorspace=bt709")
             if crop_filter:
-                cmd += ["-vf", crop_filter]
+                filters.append(crop_filter)
+            if filters:
+                cmd += ["-vf", ",".join(filters)]
 
             if cfg.rate_mode == "source_match":
                 src_kbps = self._get_source_bitrate(src)
@@ -213,7 +237,8 @@ class VideoCompressor:
                     cmd += ["-crf", str(cfg.cq_value)]
                 else:
                     cmd += ["-b:v", f"{cfg.bitrate_kbps}k"]
-                cmd += ["-preset", cfg.preset, "-tune", "film"]
+                # 不加 -tune film：网课/录屏实测同画质下体积反而更大。
+                cmd += ["-preset", cpu_preset(cfg.preset)]
 
             cmd += ["-pix_fmt", "yuv420p"]
 
@@ -294,6 +319,45 @@ class VideoCompressor:
                 pass
             raise SourceNotReadyError(f"{problem}，已删除不完整产物 {dst.name}")
 
+    def _keep_smaller(self, src: Path, dst: Path, crop_filter: str,
+                      target_duration: Optional[float]) -> None:
+        """产物不比源文件小时（源本身码率已经很低），改为不重编码直接封装源视频。
+
+        产物仍写在 dst，保证扫描器能识别“已压缩”，不会反复重压。
+        裁切会改变画面内容，直接封装做不到，此时保留重编码结果。
+        """
+        src_size = src.stat().st_size
+        dst_size = dst.stat().st_size
+        if dst_size < src_size or self.cfg.video_codec == "copy":
+            return
+        if crop_filter:
+            self.log(f">> [{src.name}] 产物比源文件大，但启用了裁切，保留重编码结果")
+            return
+        tmp = dst.with_name(f"{dst.stem}.remux{dst.suffix}")
+        cmd = ["ffmpeg", "-hide_banner", "-y", "-i", str(src)]
+        if target_duration is not None and target_duration > 0:
+            cmd += ["-t", f"{target_duration:.3f}"]
+        cmd += ["-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-dn", "-sn"]
+        if dst.suffix.lower() in (".mp4", ".mov"):
+            cmd += ["-movflags", "+faststart"]
+        cmd.append(str(tmp))
+        p = run_cmd(cmd, timeout=600)
+        try:
+            ok = (p.returncode == 0 and tmp.exists()
+                  and tmp.stat().st_size < dst_size
+                  and probe_duration(tmp) > 0)
+        except OSError:
+            ok = False
+        if not ok:
+            tmp.unlink(missing_ok=True)
+            self.log(f">> [{src.name}] 产物比源文件大，直接封装失败，保留重编码结果")
+            return
+        tmp.replace(dst)
+        self.log(
+            f">> [{src.name}] 重编码后 {dst_size / 1048576:.1f}MB 不小于源 "
+            f"{src_size / 1048576:.1f}MB，已改为原画直接封装"
+        )
+
     def compress(
         self,
         src: Path,
@@ -352,6 +416,7 @@ class VideoCompressor:
             detail = "\n".join(tail)
             raise RuntimeError(f"压缩失败: {src.name} (返回码 {ret})\n{detail}")
         self._verify_result(src, dst, src_stat, duration, encode_duration)
+        self._keep_smaller(src, dst, crop_filter, target_duration)
         if progress_cb:
             progress_cb(100)
         if status_cb:

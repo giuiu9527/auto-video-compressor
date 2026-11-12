@@ -125,6 +125,18 @@ def probe_bitrate_kbps(video: Path) -> int:
     return 0
 
 
+def probe_color_space(video: Path) -> str:
+    """视频流标记的色彩矩阵（如 bt709 / ycgco），探测失败返回空串。"""
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=color_space",
+        "-of", "default=noprint_wrappers=1:nokey=1", str(video)
+    ]
+    p = run_cmd(cmd, timeout=10)
+    s = (p.stdout or "").strip().lower()
+    return "" if s in ("", "unknown", "n/a") else s
+
+
 def probe_duration(video: Path) -> float:
     cmd = [
         "ffprobe", "-v", "error", "-show_entries", "format=duration",

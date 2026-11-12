@@ -359,5 +359,62 @@ class CloudSyncSafetyTests(unittest.TestCase):
         self.assertTrue(dst.exists())
 
 
+@unittest.skipUnless((utils._BIN / "ffmpeg.exe").exists(), "需要 bin/ffmpeg.exe")
+class EncodeIntegrationTests(unittest.TestCase):
+    """用 bin 里的 ffmpeg 真实编码几秒的合成视频。"""
+
+    def setUp(self) -> None:
+        self.temp_dir = TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.logs: list[str] = []
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def make_source(self, name: str, *extra: str) -> Path:
+        src = self.root / name
+        p = utils.run_cmd([
+            "ffmpeg", "-v", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=s=320x240:r=15:d=3",
+            "-f", "lavfi", "-i", "sine=f=440:d=3",
+            "-c:v", "libx264", *extra, "-c:a", "aac", "-shortest", str(src),
+        ], timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return src
+
+    def compress(self, src: Path, **cfg) -> Path:
+        from compressor import VideoCompressor
+        from config import CompressionConfig
+        comp = VideoCompressor(CompressionConfig(**cfg), self.logs.append, lambda: False)
+        return comp.compress(src, self.root / "out")
+
+    def test_cpu_codec_accepts_nvenc_style_preset(self) -> None:
+        src = self.make_source("a.mkv", "-crf", "18")
+        dst = self.compress(src, video_codec="libx264", preset="p4", cq_value=30)
+        self.assertGreater(utils.probe_duration(dst), 2.5)
+
+    def test_ycgco_tagged_source_is_encoded(self) -> None:
+        # 手机投屏(scrcpy)录像常带 ycgco 标记，像素格式转换遇到它会直接失败。
+        src = self.make_source("phone.mkv", "-crf", "18",
+                               "-bsf:v", "h264_metadata=matrix_coefficients=8")
+        self.assertEqual(utils.probe_color_space(src), "ycgco")
+        dst = self.compress(src, video_codec="libx264", preset="veryfast", cq_value=30)
+        self.assertGreater(utils.probe_duration(dst), 2.5)
+
+    def test_output_larger_than_source_falls_back_to_remux(self) -> None:
+        src = self.make_source("tiny.mkv", "-crf", "45")
+        dst = self.compress(src, video_codec="libx264", preset="veryfast", cq_value=5)
+        # 直接封装只换容器，体积≈源文件（小文件的容器开销可能略大一点）。
+        self.assertLess(dst.stat().st_size, src.stat().st_size * 1.1)
+        self.assertGreater(utils.probe_duration(dst), 2.5)
+        self.assertTrue(any("直接封装" in m for m in self.logs), self.logs)
+        self.assertFalse(list((self.root / "out").glob("*.remux.*")))
+
+    def test_crop_keeps_reencoded_output_even_if_larger(self) -> None:
+        src = self.make_source("tiny2.mkv", "-crf", "45")
+        dst = self.compress(src, video_codec="libx264", preset="veryfast", cq_value=5, extra_top=20)
+        self.assertEqual(utils.probe_dimensions(dst), (320, 220))
+
+
 if __name__ == "__main__":
     unittest.main()

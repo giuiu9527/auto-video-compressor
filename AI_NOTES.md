@@ -43,13 +43,21 @@
   - 已有压缩产物的源视频标记为 `⏩ 已跳过`；全局强制开关或右键强制可绕过此检查。
 - **手动清空机制**: 提供 `🧹 清空列表` 按钮，可清空 UI 表格并重置内存扫描历史。
 
+### 4. 编码参数细节 (`compressor.py`)
+- **压缩模板** (`templates.py` + `params_form.py`): 用户模板存于 `compress_templates.json`；输出前缀与并发数不属于模板 (`NON_TEMPLATE_FIELDS`)。手动任务可单独选模板。
+- **预设映射**: 界面预设默认 `p4`（NVENC 专用）。CPU 编码 (libx264/libx265) 不认 p1~p7，`cpu_preset()` 映射为 veryfast~veryslow。
+- **不加 `-tune film`**: libx265 不支持该值会直接失败；libx264 上网课素材实测同 SSIM 下体积更大。
+- **NVENC CQ 锁定 qmin=qmax=cq 是有意的**: 实测放开后（`-b:v 0`）同 CQ 体积大 1.9~2.3 倍，别"优化"掉。
+- **ycgco 色彩标记**: 手机投屏 (scrcpy) 录像的 H.264 常标为 ycgco，FFmpeg 像素格式转换不支持，`-hwaccel cuda` 必失败。`build_command` 探测到非常规色彩矩阵时在滤镜链最前加 `setparams=colorspace=bt709`（只改标记）。
+- **产物不比源小**: 低码率源（如 160kbps 网课）用 CQ23 反而变大。`_keep_smaller` 改为 `-c copy` 直接封装源视频写回同一 dst（保证扫描器认为已压缩、不会反复重压）；启用裁切时保留重编码结果。
+
 ---
 
 ## 📦 PyInstaller 打包与故障排除 (`AutoVideoCompressor.spec`)
 
 ### 1. 启动报错 `Failed to start embedded python interpreter!`
 - **原因**: 可执行文件名包含中文字符（如 `视频自动循环监控压缩工具.exe`）时，Windows C 语言 Bootloader 解析 `_internal/python312.dll` 存在 ANSI/Codepage 路径编码转换故障。
-- **解决方案**: 可执行文件统一命名为纯英文 **`AutoVideoCompressor.exe`**，软件窗口标题与 UI 保持中文。
+- **解决方案**: 可执行文件统一命名为纯英文 **`IMM-Compressor.exe`**（spec 文件名仍是 `AutoVideoCompressor.spec`），软件窗口标题与 UI 保持中文。
 
 ### 2. 报错 `ModuleNotFoundError: No module named 'PySide6.QtCore'` 或 `'shiboken6.Shiboken'`
 - **原因**: PySide6 依赖 C++ 绑定生成器 `shiboken6`（包含原生 `.pyd` 扩展）。普通 PyInstaller 打包未完整收集 `shiboken6.Shiboken` 二进制库。
@@ -74,6 +82,11 @@
   1. 后台线程 `UpdateCheckWorker` 静默检查。
   2. 发现新版本弹出更新对话框，展示 Release Notes。
   3. 确认后自动下载 Zip 并解压生成批处理自替换脚本，重启换新。
+- **自建服务器通道** (`server_updater.py`, v1.2.1+): 带 SHA-256 校验。发布用 `publish_server.ps1`，它会生成 `IMM-Compressor-vX-portable.zip` + `.sha256` 并上传。
+- **⚠️ 发布要两步都做**: `release.ps1` 只发 GitHub Release（`win64.zip`），**不会**推服务器；必须再跑 `publish_server.ps1`。v1.2.6 就漏了这一步（`dist/` 里没有 v1.2.6 的 portable 包）。
+
+## 🧪 测试
+- `python -m unittest test_scanner`（未装 pytest）。`EncodeIntegrationTests` 会用 `bin/ffmpeg.exe` 真实编码几秒合成视频。
 
 ---
 
@@ -89,6 +102,10 @@
 ├── utils.py                   # 4重防冲突测试与 FFmpeg 路径注入
 ├── config.py                  # 版本号与默认配置
 ├── updater.py                 # GitHub Release 自动更新器
+├── server_updater.py          # 自建服务器更新通道 (SHA-256 校验)
+├── templates.py / params_form.py  # 压缩模板与参数表单
+├── release.ps1 / publish_server.ps1  # 发布到 GitHub / 发布到自建服务器
+├── test_scanner.py            # 单元测试 + ffmpeg 编码集成测试
 ├── styles.py                  # Modern Dark 主题 QSS 样式表
 ├── bin/                       # 随包附带的 ffmpeg.exe & ffprobe.exe
 └── AI_NOTES.md                # 本维护记忆文档
