@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""更新方式 2：从自建 OpenList 服务器更新（规范见《软件包更新方式.md》）。
+"""更新方式 2：从 123 云盘直链更新（规范见 D:\\Test Code\\软件包更新方式.md）。
 
-协议：<server><channel>update.json 清单 -> 下载 archive -> 校验 .sha256 -> 覆盖安装并重启。
+协议：<server><channel> 指向 update.json 清单 -> 下载 archive -> 校验 .sha256 -> 覆盖安装并重启。
+v1.2.1~v1.2.7 指向的 OpenList 服务器已废弃。
 与 GitHub 更新方式（updater.py）互不影响，两者可同时使用。
 """
 from __future__ import annotations
@@ -23,9 +24,11 @@ from PySide6.QtWidgets import (
 from config import APP_VERSION, app_root_dir
 from updater import parse_version_tuple
 
-DEFAULT_SERVER = "http://38.65.91.124:5244"
-# 本软件在 OpenList 上的公开分享路径（以 / 结尾）。开好分享后填入，见《软件包更新方式.md》第 2.2 节。
-DEFAULT_CHANNEL = "/p/%E8%B0%B7%E6%AD%8C%E4%BA%91%E7%9B%98/%E8%BD%AF%E4%BB%B6%E6%94%B6%E9%9B%86/myAPP/IMM-Compressor/update.json?sign=_f0sfNLHiwEmgH2P3bQo6rvRdYo-d7sbReU1kICfQEQ=:0"
+# 123 云盘直链：IMM-软件/IMM-Compressor/update.json（直链只和路径有关，覆盖上传后地址不变）。
+DEFAULT_SERVER = "https://1836258598.cdn.123clouddisk.com"
+DEFAULT_CHANNEL = "/1836258598/IMM-%E8%BD%AF%E4%BB%B6/IMM-Compressor/update.json"
+# 已废弃的 OpenList 服务器；用户以前保存过这些地址时自动改回默认。
+_DEAD_HOSTS = ("38.65.91.124", "209.146.116.186")
 EXE_NAME = "IMM-Compressor.exe"
 
 CONFIG_PATH = Path(os.environ.get("APPDATA") or Path.home()) / "IMM-Compressor" / "update_config.json"
@@ -55,6 +58,8 @@ def load_update_config() -> tuple[str, str]:
             channel = str(data["channel"]).strip()
     except Exception:
         pass
+    if any(h in server for h in _DEAD_HOSTS):
+        server, channel = DEFAULT_SERVER, DEFAULT_CHANNEL
     return server, channel
 
 
@@ -92,7 +97,13 @@ def fetch_manifest(server: str, channel: str) -> dict:
     version = str(data.get("version", "")).strip()
     if not version:
         raise RuntimeError("更新清单缺少 version 字段")
-    if data.get("archive_path"):
+    if data.get("archive_url"):
+        # 123 云盘规范：完整直链。
+        if not data.get("checksum_url"):
+            raise RuntimeError("更新清单缺少 checksum_url 字段")
+        archive_url = str(data["archive_url"])
+        sha_url = str(data["checksum_url"])
+    elif data.get("archive_path"):
         if not data.get("checksum_path"):
             raise RuntimeError("更新清单缺少 checksum_path 字段")
         archive_url = server + data["archive_path"]
@@ -137,7 +148,7 @@ class UpdateServerSettingsDialog(QDialog):
         form = QFormLayout()
         self.edit_server = QLineEdit(server)
         self.edit_channel = QLineEdit(channel)
-        self.edit_channel.setPlaceholderText("例如 /sd/xxxxxxxx/")
+        self.edit_channel.setPlaceholderText("例如 /1836258598/IMM-%E8%BD%AF%E4%BB%B6/IMM-Compressor/update.json")
         form.addRow("服务器地址", self.edit_server)
         form.addRow("链接路径", self.edit_channel)
         lay.addLayout(form)

@@ -359,6 +359,33 @@ class CloudSyncSafetyTests(unittest.TestCase):
         self.assertTrue(dst.exists())
 
 
+class ServerUpdaterTests(unittest.TestCase):
+    def test_123pan_manifest_uses_full_urls(self) -> None:
+        import json
+        import server_updater as su
+        manifest = {"version": "1.2.8", "notes": "n",
+                    "archive_url": "https://cdn.example/a/IMM-Compressor-v1.2.8-portable.zip",
+                    "checksum_url": "https://cdn.example/a/IMM-Compressor-v1.2.8-portable.zip.sha256"}
+        with patch("server_updater._http_get", return_value=json.dumps(manifest).encode()):
+            m = su.fetch_manifest(su.DEFAULT_SERVER, su.DEFAULT_CHANNEL)
+        self.assertEqual(m["archive_url"], manifest["archive_url"])
+        self.assertEqual(m["sha_url"], manifest["checksum_url"])
+
+    def test_default_manifest_is_123pan_direct_link(self) -> None:
+        import server_updater as su
+        self.assertEqual(
+            su.manifest_url(su.DEFAULT_SERVER, su.DEFAULT_CHANNEL),
+            "https://1836258598.cdn.123clouddisk.com/1836258598/IMM-%E8%BD%AF%E4%BB%B6/IMM-Compressor/update.json")
+
+    def test_saved_openlist_config_falls_back_to_default(self) -> None:
+        import server_updater as su
+        with TemporaryDirectory() as d:
+            cfg = Path(d) / "update_config.json"
+            cfg.write_text('{"server": "http://38.65.91.124:5244", "channel": "/p/x/update.json"}', encoding="utf-8")
+            with patch("server_updater.CONFIG_PATH", cfg):
+                self.assertEqual(su.load_update_config(), (su.DEFAULT_SERVER, su.DEFAULT_CHANNEL))
+
+
 @unittest.skipUnless((utils._BIN / "ffmpeg.exe").exists(), "需要 bin/ffmpeg.exe")
 class EncodeIntegrationTests(unittest.TestCase):
     """用 bin 里的 ffmpeg 真实编码几秒的合成视频。"""

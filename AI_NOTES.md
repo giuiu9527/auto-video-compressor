@@ -82,8 +82,10 @@
   1. 后台线程 `UpdateCheckWorker` 静默检查。
   2. 发现新版本弹出更新对话框，展示 Release Notes。
   3. 确认后自动下载 Zip 并解压生成批处理自替换脚本，重启换新。
-- **自建服务器通道** (`server_updater.py`, v1.2.1+): 带 SHA-256 校验。发布用 `publish_server.ps1`，它会生成 `IMM-Compressor-vX-portable.zip` + `.sha256` 并上传。
-- **⚠️ 发布要两步都做**: `release.ps1` 只发 GitHub Release（`win64.zip`），**不会**推服务器；必须再跑 `publish_server.ps1`。v1.2.6 就漏了这一步（`dist/` 里没有 v1.2.6 的 portable 包）。
+- **123 云盘通道** (`server_updater.py`, v1.2.8+): 规范见 `D:\Test Code\软件包更新方式.md`。清单直链写死为 `https://1836258598.cdn.123clouddisk.com/1836258598/IMM-%E8%BD%AF%E4%BB%B6/IMM-Compressor/update.json`，带 SHA-256 校验。
+  - 发布用 `publish_123pan.ps1 -Notes "..."`（薄壳：打 portable 包后调通用脚本 `publish_123pan.js`）。
+  - v1.2.1~v1.2.7 指向的 OpenList（38.65.91.124）已废弃、无法访问；这些旧版本只能走 GitHub 更新或手动装 ≥1.2.8。用户保存过旧地址时 `load_update_config` 会自动改回默认。
+- **⚠️ 发布要两步都做**: `release.ps1` 只发 GitHub Release（`win64.zip`），**不会**推 123 云盘；必须再跑 `publish_123pan.ps1`。
 
 ## 🧪 测试
 - `python -m unittest test_scanner`（未装 pytest）。`EncodeIntegrationTests` 会用 `bin/ffmpeg.exe` 真实编码几秒合成视频。
@@ -102,9 +104,9 @@
 ├── utils.py                   # 4重防冲突测试与 FFmpeg 路径注入
 ├── config.py                  # 版本号与默认配置
 ├── updater.py                 # GitHub Release 自动更新器
-├── server_updater.py          # 自建服务器更新通道 (SHA-256 校验)
+├── server_updater.py          # 123 云盘更新通道 (SHA-256 校验)
 ├── templates.py / params_form.py  # 压缩模板与参数表单
-├── release.ps1 / publish_server.ps1  # 发布到 GitHub / 发布到自建服务器
+├── release.ps1 / publish_123pan.ps1  # 发布到 GitHub / 发布到 123 云盘
 ├── test_scanner.py            # 单元测试 + ffmpeg 编码集成测试
 ├── styles.py                  # Modern Dark 主题 QSS 样式表
 ├── bin/                       # 随包附带的 ffmpeg.exe & ffprobe.exe
